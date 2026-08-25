@@ -1,0 +1,7 @@
+{
+  "name": "Nextcloud Sync",
+  "description": "Desktop-grade bidirectional synchronization client for Nextcloud with background sync, selective folder sync, and custom intervals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
