@@ -132,64 +132,37 @@ class SyncEngine(
             // 2. Discover Remote Folders & Apply 'syncNewFoldersByDefault' setting
             _syncState.value = _syncState.value.copy(currentAction = "Discovering remote folder structure...")
 
+            // Use repository refresh to sync folder metadata cleanly
+            val refreshResult = repository.refreshRemoteFolders()
             val rootRemoteItems = if (account.isSimulatedDemo) {
                 repository.mockServer.listFolder("/", depth = 1)
             } else {
-                val res = repository.nextcloudClient.listFolder(
+                repository.nextcloudClient.listFolder(
                     account.serverUrl,
                     account.username,
                     account.passwordOrToken,
                     "/",
                     depth = 1,
                     account.trustAllCerts
-                )
-                res.getOrDefault(emptyList())
-            }
-
-            val existingFolders = folderDao.getAllFolders().associateBy { it.remotePath }
-
-            // Discover new top-level remote folders
-            for (item in rootRemoteItems) {
-                if (item.isDirectory && item.path != "/" && item.path.isNotEmpty()) {
-                    if (!existingFolders.containsKey(item.path)) {
-                        // User-requested feature: Handle whether new folders added to Nextcloud sync automatically or not
-                        val shouldSyncByDefault = settings.syncNewFoldersByDefault
-                        val newFolderConfig = SyncFolderConfigEntity(
-                            remotePath = item.path,
-                            localRelativePath = item.displayName,
-                            isSelected = shouldSyncByDefault,
-                            displayName = item.displayName,
-                            isExplicitlyConfigured = false,
-                            remoteSize = item.size,
-                            lastSyncTime = System.currentTimeMillis()
-                        )
-                        folderDao.insertOrUpdateFolder(newFolderConfig)
-                        repository.logActivity(
-                            ActivityType.INFO,
-                            item.path,
-                            "New remote folder '${item.displayName}' discovered. Synchronized by default: ${if (shouldSyncByDefault) "YES" else "NO"}."
-                        )
-                    }
-                }
+                ).getOrDefault(emptyList())
             }
 
             // 3. Collect all enabled folders
             val currentFolders = folderDao.getAllFolders()
             val enabledFolders = currentFolders.filter { it.isSelected }
 
-            if (enabledFolders.isEmpty()) {
-                _syncState.value = _syncState.value.copy(
-                    status = SyncStatus.SUCCESS,
-                    currentAction = "No folders selected for synchronization",
-                    currentFile = ""
-                )
-                return@withContext
-            }
-
-            // 4. Discover all remote items recursively inside enabled folders
+            // 4. Discover all remote items recursively inside enabled folders + root files
             _syncState.value = _syncState.value.copy(currentAction = "Indexing Nextcloud remote files...")
             val allRemoteItemsMap = mutableMapOf<String, WebDavItem>()
 
+            // Add root-level files
+            for (item in rootRemoteItems) {
+                if (!item.isDirectory && item.path.isNotEmpty() && item.path != "/") {
+                    allRemoteItemsMap[item.path] = item
+                }
+            }
+
+            // Index inside enabled folders
             for (folder in enabledFolders) {
                 if (!isActive) break
                 val remoteItems = if (account.isSimulatedDemo) {
@@ -229,12 +202,23 @@ class SyncEngine(
             allPaths.addAll(localFilesMap.keys)
             allPaths.addAll(journalMap.keys)
 
-            // Filter paths belonging to enabled folders only
+            // Filter paths belonging to enabled folders or root level files
             val targetPaths = allPaths.filter { path ->
-                enabledFolders.any { folder ->
+                // Root-level files (no slash or only leading slash)
+                val isRootFile = !path.removePrefix("/").contains("/")
+                isRootFile || enabledFolders.any { folder ->
                     path == folder.remotePath || path.startsWith("${folder.remotePath}/")
                 }
             }.sortedWith(compareBy({ !it.contains("/") }, { it.count { c -> c == '/' } }, { it }))
+
+            if (targetPaths.isEmpty() && enabledFolders.isEmpty()) {
+                _syncState.value = _syncState.value.copy(
+                    status = SyncStatus.SUCCESS,
+                    currentAction = "Sync complete: All files up to date",
+                    currentFile = ""
+                )
+                return@withContext
+            }
 
             _syncState.value = _syncState.value.copy(
                 totalFilesCount = targetPaths.size,
@@ -679,6 +663,16 @@ class SyncEngine(
 
     private fun scanLocalDirectory(baseDir: File, enabledFolders: List<SyncFolderConfigEntity>): Map<String, File> {
         val map = mutableMapOf<String, File>()
+        // Scan root level files
+        if (baseDir.exists()) {
+            val rootFiles = baseDir.listFiles() ?: emptyArray()
+            for (file in rootFiles) {
+                if (!file.isDirectory && !file.name.startsWith(".") && !file.name.contains("(conflicted copy")) {
+                    map["/${file.name}"] = file
+                }
+            }
+        }
+        // Scan enabled folder trees
         for (folder in enabledFolders) {
             val folderDir = File(baseDir, folder.localRelativePath)
             if (!folderDir.exists()) folderDir.mkdirs()

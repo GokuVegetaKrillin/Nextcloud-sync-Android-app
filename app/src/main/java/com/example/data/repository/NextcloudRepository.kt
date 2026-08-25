@@ -156,6 +156,64 @@ class NextcloudRepository(private val context: Context) {
         }
     }
 
+    suspend fun refreshRemoteFolders(): Result<List<SyncFolderConfigEntity>> = withContext(Dispatchers.IO) {
+        val account = accountDao.getAccount() ?: return@withContext Result.failure(Exception("No account configured"))
+        val settings = settingsDao.getSettings() ?: SyncSettingsEntity()
+
+        val rootRemoteItems = if (account.isSimulatedDemo) {
+            mockServer.listFolder("/", depth = 1)
+        } else {
+            val res = nextcloudClient.listFolder(
+                account.serverUrl,
+                account.username,
+                account.passwordOrToken,
+                "/",
+                depth = 1,
+                account.trustAllCerts
+            )
+            res.getOrElse { return@withContext Result.failure(it) }
+        }
+
+        val existingFolders = folderDao.getAllFolders().associateBy { it.remotePath }
+        val discoveredFolders = rootRemoteItems.filter { it.isDirectory && it.path != "/" && it.path.isNotEmpty() }
+
+        // Clean up old seeded folders if discovering from a real Nextcloud server
+        if (!account.isSimulatedDemo && discoveredFolders.isNotEmpty()) {
+            val serverFolderPaths = discoveredFolders.map { it.path }.toSet()
+            val stale = existingFolders.values.filter { it.remotePath !in serverFolderPaths }
+            for (staleFolder in stale) {
+                folderDao.deleteFolder(staleFolder.remotePath)
+            }
+        }
+
+        for (item in discoveredFolders) {
+            val existing = existingFolders[item.path]
+            val shouldSyncByDefault = settings.syncNewFoldersByDefault
+            val folderConfig = existing?.copy(
+                remoteSize = item.size,
+                displayName = item.displayName,
+                lastSyncTime = System.currentTimeMillis()
+            ) ?: SyncFolderConfigEntity(
+                remotePath = item.path,
+                localRelativePath = item.displayName,
+                isSelected = shouldSyncByDefault,
+                displayName = item.displayName,
+                isExplicitlyConfigured = false,
+                remoteSize = item.size,
+                lastSyncTime = System.currentTimeMillis()
+            )
+            folderDao.insertOrUpdateFolder(folderConfig)
+        }
+
+        logActivity(
+            type = ActivityType.INFO,
+            path = "/",
+            message = "Discovered ${discoveredFolders.size} folders on Nextcloud server."
+        )
+
+        Result.success(folderDao.getAllFolders())
+    }
+
     suspend fun updateQuota() = withContext(Dispatchers.IO) {
         val account = accountDao.getAccount() ?: return@withContext
         val quota = if (account.isSimulatedDemo) {

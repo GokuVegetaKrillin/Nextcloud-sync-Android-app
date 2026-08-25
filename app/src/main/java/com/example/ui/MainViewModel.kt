@@ -76,6 +76,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun refreshRemoteFolders() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _isTestingConnection.value = true
+            val res = repository.refreshRemoteFolders()
+            _isTestingConnection.value = false
+            if (res.isSuccess) {
+                _statusMessage.value = "Updated: ${res.getOrNull()?.size ?: 0} server folders discovered"
+            } else {
+                _statusMessage.value = "Folder scan failed: ${res.exceptionOrNull()?.message ?: "Check connection"}"
+            }
+        }
+    }
+
     fun startSync() {
         syncEngine.startSync(isManual = true)
         refreshLocalFiles()
@@ -138,6 +151,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _serverConnectionStatus.value = status
             _isTestingConnection.value = false
             if (status.isConnected) {
+                repository.refreshRemoteFolders()
                 _statusMessage.value = "Server address updated successfully ($newServerUrl)"
             } else {
                 _statusMessage.value = "Address saved, but connection failed: ${status.errorMessage}"
@@ -167,8 +181,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.saveAccount(updated)
             val status = repository.testConnection(serverUrl, username, passwordOrToken, trustAll, isDemo)
             _serverConnectionStatus.value = status
+
+            if (status.isConnected) {
+                val refreshRes = repository.refreshRemoteFolders()
+                if (refreshRes.isSuccess) {
+                    _statusMessage.value = "Server connected! Discovered ${refreshRes.getOrNull()?.size ?: 0} folders."
+                } else {
+                    _statusMessage.value = "Connected to Nextcloud. Folder scan: ${refreshRes.exceptionOrNull()?.message ?: "Check WebDAV permissions"}"
+                }
+            } else {
+                _statusMessage.value = "Credentials saved (Connection test: ${status.errorMessage ?: "Unreachable"})"
+            }
             _isTestingConnection.value = false
-            _statusMessage.value = "Account settings saved"
         }
     }
 
@@ -199,38 +223,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         refreshLocalFiles()
     }
 
+    fun navigateUp(): Boolean {
+        val current = _currentLocalSubpath.value
+        if (current.isEmpty()) return false
+        val parent = current.trimEnd('/').substringBeforeLast('/', "")
+        _currentLocalSubpath.value = parent
+        refreshLocalFiles()
+        return true
+    }
+
     fun refreshLocalFiles() {
-        val files = repository.getLocalFiles(_currentLocalSubpath.value)
-        _localFiles.value = files
+        _localFiles.value = repository.getLocalFiles(_currentLocalSubpath.value)
     }
 
-    fun createLocalFile(fileName: String, content: String) {
-        repository.createLocalFile(_currentLocalSubpath.value, fileName, content)
-        refreshLocalFiles()
-        _statusMessage.value = "Created local file: $fileName"
+    fun createLocalFile(name: String, content: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.createLocalFile(_currentLocalSubpath.value, name, content)
+            refreshLocalFiles()
+            _statusMessage.value = "Created local file: $name"
+        }
     }
 
-    fun createLocalFolder(folderName: String) {
-        repository.createLocalFolder(_currentLocalSubpath.value, folderName)
-        refreshLocalFiles()
-        _statusMessage.value = "Created local folder: $folderName"
+    fun createLocalFolder(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.createLocalFolder(_currentLocalSubpath.value, name)
+            refreshLocalFiles()
+            _statusMessage.value = "Created local folder: $name"
+        }
+    }
+
+    fun createRemoteDemoFolder(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val acc = repository.getAccount()
+            if (acc?.isSimulatedDemo == true) {
+                repository.mockServer.addRemoteFolder("/$name")
+            } else if (acc != null) {
+                repository.nextcloudClient.createDirectory(
+                    acc.serverUrl,
+                    acc.username,
+                    acc.passwordOrToken,
+                    "/$name",
+                    acc.trustAllCerts
+                )
+            }
+            repository.refreshRemoteFolders()
+        }
+    }
+
+    fun createRemoteDemoFile(folder: String, fileName: String, content: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val cleanFolder = if (folder.startsWith("/")) folder else "/$folder"
+            val path = if (cleanFolder == "/") "/$fileName" else "$cleanFolder/$fileName"
+            val acc = repository.getAccount()
+            if (acc?.isSimulatedDemo == true) {
+                repository.mockServer.addRemoteFile(path, content)
+                _statusMessage.value = "Added file to demo server: $path"
+            } else if (acc != null) {
+                val tempFile = File.createTempFile("nc_upload", ".tmp")
+                tempFile.writeText(content)
+                val res = repository.nextcloudClient.uploadFile(
+                    acc.serverUrl,
+                    acc.username,
+                    acc.passwordOrToken,
+                    path,
+                    tempFile,
+                    trustAll = acc.trustAllCerts
+                )
+                tempFile.delete()
+                if (res.isSuccess) {
+                    _statusMessage.value = "Created file on server: $path"
+                } else {
+                    _statusMessage.value = "Failed to create file on server: ${res.exceptionOrNull()?.message}"
+                }
+            }
+        }
     }
 
     fun deleteLocalFile(file: File) {
-        repository.deleteLocalFile(file)
-        refreshLocalFiles()
-        _statusMessage.value = "Deleted local item: ${file.name}"
-    }
-
-    // Demo/Simulation file creators for testing
-    fun createRemoteDemoFile(folder: String, name: String, content: String) {
-        val rel = if (folder.isEmpty() || folder == "/") "/$name" else "/$folder/$name"
-        repository.mockServer.addRemoteFile(rel, content)
-        _statusMessage.value = "Simulated new remote file on Nextcloud: $rel"
-    }
-
-    fun createRemoteDemoFolder(folderName: String) {
-        repository.mockServer.addRemoteFolder("/$folderName")
-        _statusMessage.value = "Simulated new remote folder on Nextcloud: /$folderName"
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteLocalFile(file)
+            refreshLocalFiles()
+            _statusMessage.value = "Deleted local file: ${file.name}"
+        }
     }
 }

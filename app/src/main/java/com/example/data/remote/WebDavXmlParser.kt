@@ -1,10 +1,10 @@
 package com.example.data.remote
 
+import android.util.Log
 import android.util.Xml
 import com.example.data.model.WebDavItem
 import com.example.data.model.WebDavQuota
 import org.xmlpull.v1.XmlPullParser
-import java.io.InputStream
 import java.io.StringReader
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -20,18 +20,21 @@ object WebDavXmlParser {
         timeZone = TimeZone.getTimeZone("UTC")
     }
 
-    fun parsePropfind(xmlContent: String, basePathPrefix: String): List<WebDavItem> {
-        return parsePropfind(StringReader(xmlContent), basePathPrefix)
+    fun parsePropfind(xmlContent: String, basePathPrefix: String, username: String = ""): List<WebDavItem> {
+        return parsePropfind(StringReader(xmlContent), basePathPrefix, username)
     }
 
-    fun parsePropfind(reader: java.io.Reader, basePathPrefix: String): List<WebDavItem> {
+    fun parsePropfind(reader: java.io.Reader, basePathPrefix: String, username: String = ""): List<WebDavItem> {
         val parser = Xml.newPullParser()
-        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+        parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
         parser.setInput(reader)
 
         val items = mutableListOf<WebDavItem>()
         var eventType = parser.eventType
 
+        var inResponse = false
+        var inPropstat = false
+        var inProp = false
         var currentHref = ""
         var currentDisplayName = ""
         var isDirectory = false
@@ -41,14 +44,17 @@ object WebDavXmlParser {
         var lastModified: Long = 0
         var fileId: String? = null
         var permissions: String? = null
-        var currentStatus = ""
+        var has200Success = false
 
         while (eventType != XmlPullParser.END_DOCUMENT) {
-            val name = parser.name
+            val rawName = parser.name ?: ""
+            val localName = if (rawName.contains(":")) rawName.substringAfter(":") else rawName
+
             when (eventType) {
                 XmlPullParser.START_TAG -> {
-                    when (name) {
+                    when (localName.lowercase()) {
                         "response" -> {
+                            inResponse = true
                             currentHref = ""
                             currentDisplayName = ""
                             isDirectory = false
@@ -58,78 +64,121 @@ object WebDavXmlParser {
                             lastModified = 0
                             fileId = null
                             permissions = null
-                            currentStatus = ""
+                            has200Success = false
+                        }
+                        "propstat" -> {
+                            inPropstat = true
+                        }
+                        "prop" -> {
+                            inProp = true
                         }
                         "href" -> {
-                            currentHref = parser.nextText().trim()
+                            if (inResponse && !inPropstat) {
+                                currentHref = parser.nextText().trim()
+                            }
                         }
                         "status" -> {
-                            currentStatus = parser.nextText().trim()
+                            if (inPropstat) {
+                                val statusText = parser.nextText().trim()
+                                if (statusText.contains("200")) {
+                                    has200Success = true
+                                }
+                            }
                         }
                         "collection" -> {
-                            isDirectory = true
+                            if (inProp) {
+                                isDirectory = true
+                            }
                         }
                         "getetag" -> {
-                            etag = parser.nextText().trim().removeSurrounding("\"")
+                            if (inProp) {
+                                val text = parser.nextText().trim().removeSurrounding("\"")
+                                if (text.isNotEmpty()) etag = text
+                            }
                         }
                         "getlastmodified" -> {
-                            val text = parser.nextText().trim()
-                            lastModified = parseDate(text)
+                            if (inProp) {
+                                val text = parser.nextText().trim()
+                                val parsed = parseDate(text)
+                                if (parsed > 0) lastModified = parsed
+                            }
                         }
                         "getcontentlength" -> {
-                            contentLength = parser.nextText().trim().toLongOrNull() ?: 0L
+                            if (inProp) {
+                                val len = parser.nextText().trim().toLongOrNull()
+                                if (len != null) contentLength = len
+                            }
                         }
                         "size" -> {
-                            // oc:size for folders in Nextcloud
-                            ocSize = parser.nextText().trim().toLongOrNull() ?: 0L
+                            // oc:size for directories and files
+                            if (inProp) {
+                                val s = parser.nextText().trim().toLongOrNull()
+                                if (s != null && s > 0) ocSize = s
+                            }
                         }
                         "id" -> {
                             // oc:id
-                            fileId = parser.nextText().trim()
+                            if (inProp) {
+                                val id = parser.nextText().trim()
+                                if (id.isNotEmpty()) fileId = id
+                            }
                         }
                         "permissions" -> {
                             // oc:permissions
-                            permissions = parser.nextText().trim()
+                            if (inProp) {
+                                val p = parser.nextText().trim()
+                                if (p.isNotEmpty()) permissions = p
+                            }
                         }
                         "displayname" -> {
-                            currentDisplayName = parser.nextText().trim()
+                            if (inProp) {
+                                val d = parser.nextText().trim()
+                                if (d.isNotEmpty()) currentDisplayName = d
+                            }
                         }
                     }
                 }
                 XmlPullParser.END_TAG -> {
-                    if (name == "response") {
-                        if (currentHref.isNotEmpty() && (currentStatus.isEmpty() || currentStatus.contains("200"))) {
-                            val decodedHref = try {
-                                java.net.URLDecoder.decode(currentHref, "UTF-8")
-                            } catch (e: Exception) {
-                                currentHref
-                            }
-                            val cleanPath = normalizePath(decodedHref, basePathPrefix)
-                            val finalName = if (currentDisplayName.isNotEmpty()) {
-                                currentDisplayName
-                            } else {
-                                cleanPath.trimEnd('/').substringAfterLast('/')
-                            }
+                    when (localName.lowercase()) {
+                        "prop" -> inProp = false
+                        "propstat" -> inPropstat = false
+                        "response" -> {
+                            inResponse = false
+                            if (currentHref.isNotEmpty()) {
+                                val decodedHref = try {
+                                    java.net.URLDecoder.decode(currentHref, "UTF-8")
+                                } catch (e: Exception) {
+                                    currentHref
+                                }
 
-                            val finalSize = if (isDirectory) {
-                                if (ocSize > 0) ocSize else contentLength
-                            } else {
-                                contentLength
-                            }
+                                val cleanPath = normalizePath(decodedHref, basePathPrefix, username)
+                                val finalName = if (currentDisplayName.isNotEmpty() && cleanPath != "/" && currentDisplayName != username) {
+                                    currentDisplayName
+                                } else {
+                                    val segment = cleanPath.trimEnd('/').substringAfterLast('/')
+                                    if (segment.isEmpty()) "/" else segment
+                                }
 
-                            items.add(
-                                WebDavItem(
-                                    href = currentHref,
-                                    path = cleanPath,
-                                    displayName = if (finalName.isEmpty()) "/" else finalName,
-                                    isDirectory = isDirectory,
-                                    size = finalSize,
-                                    etag = etag,
-                                    lastModified = if (lastModified > 0) lastModified else System.currentTimeMillis(),
-                                    fileId = fileId,
-                                    permissions = permissions
+                                val finalSize = if (isDirectory) {
+                                    if (ocSize > 0) ocSize else contentLength
+                                } else {
+                                    if (contentLength > 0) contentLength else ocSize
+                                }
+
+                                items.add(
+                                    WebDavItem(
+                                        href = currentHref,
+                                        path = cleanPath,
+                                        displayName = finalName,
+                                        isDirectory = isDirectory,
+                                        size = finalSize,
+                                        etag = etag,
+                                        lastModified = if (lastModified > 0) lastModified else System.currentTimeMillis(),
+                                        fileId = fileId,
+                                        permissions = permissions
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }
@@ -143,7 +192,7 @@ object WebDavXmlParser {
     fun parseQuota(xmlContent: String): WebDavQuota? {
         return try {
             val parser = Xml.newPullParser()
-            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, true)
+            parser.setFeature(XmlPullParser.FEATURE_PROCESS_NAMESPACES, false)
             parser.setInput(StringReader(xmlContent))
 
             var used: Long = -1
@@ -152,7 +201,9 @@ object WebDavXmlParser {
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 if (eventType == XmlPullParser.START_TAG) {
-                    when (parser.name) {
+                    val rawName = parser.name ?: ""
+                    val localName = if (rawName.contains(":")) rawName.substringAfter(":") else rawName
+                    when (localName.lowercase()) {
                         "quota-used-bytes" -> {
                             used = parser.nextText().trim().toLongOrNull() ?: -1
                         }
@@ -179,12 +230,31 @@ object WebDavXmlParser {
         }
     }
 
-    private fun normalizePath(href: String, prefix: String): String {
+    fun normalizePath(href: String, prefix: String, username: String = ""): String {
         var path = href
-        val prefixIndex = path.indexOf(prefix)
-        if (prefixIndex != -1) {
-            path = path.substring(prefixIndex + prefix.length)
+
+        // 1. If prefix matches exactly
+        if (prefix.isNotEmpty()) {
+            val prefixIndex = path.indexOf(prefix)
+            if (prefixIndex != -1) {
+                path = path.substring(prefixIndex + prefix.length)
+            }
         }
+
+        // 2. Fallback: Check for /dav/files/<username>
+        if (path.contains("/dav/files/")) {
+            val filesIdx = path.indexOf("/dav/files/")
+            val afterFiles = path.substring(filesIdx + "/dav/files/".length)
+            val nextSlash = afterFiles.indexOf('/')
+            path = if (nextSlash != -1) afterFiles.substring(nextSlash) else "/"
+        } else if (path.contains("/remote.php/webdav")) {
+            val webdavIdx = path.indexOf("/remote.php/webdav")
+            path = path.substring(webdavIdx + "/remote.php/webdav".length)
+        } else if (username.isNotEmpty() && path.contains("/$username/")) {
+            val userIdx = path.indexOf("/$username/")
+            path = path.substring(userIdx + "/$username".length)
+        }
+
         if (!path.startsWith("/")) {
             path = "/$path"
         }

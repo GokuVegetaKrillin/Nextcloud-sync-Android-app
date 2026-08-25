@@ -1,5 +1,6 @@
 package com.example.data.remote
 
+import android.util.Log
 import com.example.data.model.ServerStatus
 import com.example.data.model.WebDavItem
 import com.example.data.model.WebDavQuota
@@ -22,7 +23,7 @@ import javax.net.ssl.X509TrustManager
 
 class NextcloudClient {
 
-    private val userAgent = "Mozilla/5.0 (Android) Nextcloud-Desktop-Sync/3.14"
+    private val userAgent = "Mozilla/5.0 (Android) Nextcloud-Android-Sync/3.30"
 
     private val defaultClient: OkHttpClient by lazy {
         createHttpClient(trustAll = false)
@@ -42,6 +43,8 @@ class NextcloudClient {
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
+            .followRedirects(true)
+            .followSslRedirects(true)
 
         if (trustAll) {
             try {
@@ -67,6 +70,21 @@ class NextcloudClient {
         var url = rawUrl.trim()
         if (!url.startsWith("http://") && !url.startsWith("https://")) {
             url = "https://$url"
+        }
+        url = url.trimEnd('/')
+
+        // Strip web UI path segments if user pasted browser URL
+        val indexPhpPos = url.indexOf("/index.php")
+        if (indexPhpPos != -1) {
+            url = url.substring(0, indexPhpPos)
+        }
+        val remotePhpPos = url.indexOf("/remote.php")
+        if (remotePhpPos != -1) {
+            url = url.substring(0, remotePhpPos)
+        }
+        val appsPos = url.indexOf("/apps/")
+        if (appsPos != -1) {
+            url = url.substring(0, appsPos)
         }
         return url.trimEnd('/')
     }
@@ -141,8 +159,13 @@ class NextcloudClient {
     ): Result<List<WebDavItem>> = withContext(Dispatchers.IO) {
         try {
             val davBase = getWebDavBaseUrl(serverUrl, username)
-            val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
-            val targetUrl = "$davBase$cleanPath"
+            val cleanPath = when {
+                remotePath.isEmpty() || remotePath == "/" -> ""
+                remotePath.startsWith("/") -> remotePath
+                else -> "/$remotePath"
+            }
+            // For WebDAV directory PROPFIND, ensure URL ends with trailing slash
+            val targetUrl = if (cleanPath.isEmpty()) "$davBase/" else "$davBase$cleanPath/"
             val prefix = "/remote.php/dav/files/$username"
 
             val propfindXml = """
@@ -159,6 +182,7 @@ class NextcloudClient {
                     <oc:size/>
                     <d:quota-used-bytes/>
                     <d:quota-available-bytes/>
+                    <d:displayname/>
                   </d:prop>
                 </d:propfind>
             """.trimIndent()
@@ -178,12 +202,15 @@ class NextcloudClient {
             val body = response.body?.string() ?: ""
 
             if (code == 207 || response.isSuccessful) {
-                val items = WebDavXmlParser.parsePropfind(body, prefix)
+                val items = WebDavXmlParser.parsePropfind(body, prefix, username)
+                Log.d("NextcloudClient", "PROPFIND $targetUrl success: found ${items.size} items")
                 Result.success(items)
             } else {
+                Log.w("NextcloudClient", "PROPFIND $targetUrl failed HTTP $code: ${response.message}")
                 Result.failure(IOException("PROPFIND failed with HTTP $code: ${response.message}"))
             }
         } catch (e: Exception) {
+            Log.e("NextcloudClient", "PROPFIND error: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -196,7 +223,6 @@ class NextcloudClient {
     ): WebDavQuota? = withContext(Dispatchers.IO) {
         try {
             val davBase = getWebDavBaseUrl(serverUrl, username)
-            val prefix = "/remote.php/dav/files/$username"
             val propfindXml = """
                 <?xml version="1.0" encoding="utf-8" ?>
                 <d:propfind xmlns:d="DAV:">
@@ -209,7 +235,7 @@ class NextcloudClient {
 
             val credential = Credentials.basic(username, passwordOrToken)
             val request = Request.Builder()
-                .url(davBase)
+                .url("$davBase/")
                 .method("PROPFIND", propfindXml.toRequestBody("application/xml; charset=utf-8".toMediaTypeOrNull()))
                 .header("Authorization", credential)
                 .header("User-Agent", userAgent)
@@ -255,8 +281,9 @@ class NextcloudClient {
                 return@withContext Result.failure(IOException("Download failed HTTP ${response.code}: ${response.message}"))
             }
 
-            val etag = response.header("ETag")?.removeSurrounding("\"") ?: ""
-            val lastModifiedHeader = response.header("Last-Modified")
+            val etag = response.header("ETag")?.removeSurrounding("\"")
+                ?: response.header("OC-ETag")?.removeSurrounding("\"")
+                ?: ""
             val totalBytes = response.body?.contentLength() ?: -1L
 
             destFile.parentFile?.mkdirs()
@@ -343,7 +370,7 @@ class NextcloudClient {
         try {
             val davBase = getWebDavBaseUrl(serverUrl, username)
             val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
-            val targetUrl = "$davBase$cleanPath"
+            val targetUrl = "$davBase$cleanPath/"
             val credential = Credentials.basic(username, passwordOrToken)
 
             val request = Request.Builder()

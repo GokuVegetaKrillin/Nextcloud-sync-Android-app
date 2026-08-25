@@ -147,7 +147,18 @@ fun FoldersScreen(
                         )
                     }
 
-                    Row {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = { viewModel.refreshRemoteFolders() },
+                            modifier = Modifier.testTag("refresh_folders_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Scan server folders",
+                                tint = NcPrimaryBlue
+                            )
+                        }
+
                         TextButton(
                             onClick = {
                                 folders.forEach { folder ->
