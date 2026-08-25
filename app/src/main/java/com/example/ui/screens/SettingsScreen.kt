@@ -32,6 +32,7 @@ import com.example.data.model.ConflictStrategy
 import com.example.data.model.SyncIntervalUnit
 import com.example.ui.MainViewModel
 import com.example.ui.theme.*
+import com.example.util.BatteryOptimizationHelper
 import com.example.util.StoragePermissionHelper
 import java.io.File
 
@@ -48,12 +49,15 @@ fun SettingsScreen(
     val serverStatus by viewModel.serverConnectionStatus.collectAsState()
     val isTestingConnection by viewModel.isTestingConnection.collectAsState()
     val isStoragePermissionGranted by viewModel.storagePermissionGranted.collectAsState()
+    val isBatteryOptimizationIgnored by viewModel.batteryOptimizationIgnored.collectAsState()
+    val isNotificationPermissionGranted by viewModel.notificationPermissionGranted.collectAsState()
+    val isExactAlarmAllowed by viewModel.exactAlarmAllowed.collectAsState()
 
     // Observe app lifecycle so returning from Android System Settings instantly refreshes permissions & status
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                viewModel.refreshStoragePermissionState()
+                viewModel.refreshAllSystemStates()
                 viewModel.refreshLocalFiles()
             }
         }
@@ -160,7 +164,211 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp)
     ) {
-        // Section 1: Android Local Storage & Destination Directory
+        // Section 1: Background Persistence & Battery Keep-Alive (Crucial for never getting killed)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (!isBatteryOptimizationIgnored || !isNotificationPermissionGranted)
+                        MaterialTheme.colorScheme.surface
+                    else MaterialTheme.colorScheme.surface
+                ),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                modifier = Modifier.fillMaxWidth().testTag("background_persistence_card")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.BatterySaver,
+                            contentDescription = null,
+                            tint = if (isBatteryOptimizationIgnored) NcSuccessGreen else NcWarningAmber,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Background Persistence & Keep-Alive",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                text = "Prevent Android from killing Nextcloud Sync when other apps open",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Diagnostic Status Grid
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            // 1. Battery Optimization Status
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Icon(
+                                        imageVector = if (isBatteryOptimizationIgnored) Icons.Filled.CheckCircle else Icons.Filled.Warning,
+                                        contentDescription = null,
+                                        tint = if (isBatteryOptimizationIgnored) NcSuccessGreen else NcWarningAmber,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "Battery Optimization",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        )
+                                        Text(
+                                            text = if (isBatteryOptimizationIgnored) "Unrestricted (Safe from memory killer)" else "Optimized (Android will kill when RAM is low)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isBatteryOptimizationIgnored) NcSuccessGreen else NcWarningAmber
+                                        )
+                                    }
+                                }
+
+                                if (!isBatteryOptimizationIgnored) {
+                                    Button(
+                                        onClick = { BatteryOptimizationHelper.requestIgnoreBatteryOptimization(context) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = NcWarningAmber),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.testTag("unrestrict_battery_btn")
+                                    ) {
+                                        Text("Unrestrict", color = Color.Black, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+
+                            // 2. Notification / Foreground Service Permission
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Icon(
+                                        imageVector = if (isNotificationPermissionGranted) Icons.Filled.CheckCircle else Icons.Filled.NotificationsOff,
+                                        contentDescription = null,
+                                        tint = if (isNotificationPermissionGranted) NcSuccessGreen else NcWarningAmber,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "Keep-Alive Notifications",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        )
+                                        Text(
+                                            text = if (isNotificationPermissionGranted) "Allowed (Foreground service active)" else "Blocked (Required for background survival)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isNotificationPermissionGranted) NcSuccessGreen else NcWarningAmber
+                                        )
+                                    }
+                                }
+
+                                if (!isNotificationPermissionGranted) {
+                                    Button(
+                                        onClick = { BatteryOptimizationHelper.openNotificationSettings(context) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.testTag("enable_notifications_btn")
+                                    ) {
+                                        Text("Allow", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+
+                            // 3. Exact Alarms
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                    Icon(
+                                        imageVector = if (isExactAlarmAllowed) Icons.Filled.CheckCircle else Icons.Filled.AlarmOff,
+                                        contentDescription = null,
+                                        tint = if (isExactAlarmAllowed) NcSuccessGreen else NcWarningAmber,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column {
+                                        Text(
+                                            text = "Exact Alarm Timing",
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                        )
+                                        Text(
+                                            text = if (isExactAlarmAllowed) "Allowed (Exact scheduled wakeups)" else "Restricted by system",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isExactAlarmAllowed) NcSuccessGreen else NcWarningAmber
+                                        )
+                                    }
+                                }
+
+                                if (!isExactAlarmAllowed) {
+                                    Button(
+                                        onClick = { BatteryOptimizationHelper.openExactAlarmSettings(context) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("Allow", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Explanation Box
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "💡 When battery optimization is unrestricted and notifications are enabled, Android treats Nextcloud Sync as a critical foreground daemon and will not terminate it during memory pressure or sleep.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Start/Refresh Background Daemon button
+                    OutlinedButton(
+                        onClick = { viewModel.startPersistentForegroundDaemon() },
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("restart_daemon_btn")
+                    ) {
+                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Start / Refresh Keep-Alive Service Daemon")
+                    }
+                }
+            }
+        }
+
+        // Section 2: Android Local Storage & Destination Directory
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -465,7 +673,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 2: Server Configuration (Editable Server Address)
+        // Section 3: Server Configuration (Editable Server Address)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -639,7 +847,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 3: Custom Sync Interval (Arbitrary Minutes / Hours / Days)
+        // Section 4: Custom Sync Interval (Arbitrary Minutes / Hours / Days)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -743,7 +951,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 4: Sync Behavior (Sync New Folders By Default, Background Sync)
+        // Section 5: Sync Behavior (Sync New Folders By Default, Background Sync)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -814,7 +1022,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 5: Maintenance & Journal Reset
+        // Section 6: Maintenance & Journal Reset
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),

@@ -4,8 +4,10 @@ import android.app.Application
 import com.example.data.repository.NextcloudRepository
 import com.example.sync.SyncEngine
 import com.example.sync.SyncScheduler
+import com.example.sync.service.NextcloudSyncForegroundService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 
 class NextcloudApp : Application() {
@@ -28,7 +30,15 @@ class NextcloudApp : Application() {
 
         CoroutineScope(Dispatchers.IO).launch {
             repository.initializeDefaultsIfNeeded()
-            syncScheduler.scheduleNextSync()
+            val settings = repository.settingsFlow.firstOrNull()
+            if (settings?.runInBackground == true) {
+                syncScheduler.scheduleNextSync()
+                try {
+                    NextcloudSyncForegroundService.startPersistentDaemon(this@NextcloudApp)
+                } catch (e: Exception) {
+                    // Ignore foreground service start restrictions if activity not foregrounded yet
+                }
+            }
         }
     }
 }

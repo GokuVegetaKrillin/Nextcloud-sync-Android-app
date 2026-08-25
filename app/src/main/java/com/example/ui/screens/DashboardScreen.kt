@@ -21,11 +21,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.data.model.AccountEntity
 import com.example.data.model.ConflictEntity
 import com.example.data.model.SyncActivityEntity
@@ -38,6 +42,7 @@ import com.example.ui.components.ActivityTypeBadge
 import com.example.ui.components.FormatUtils
 import com.example.ui.components.SyncStatusBadge
 import com.example.ui.theme.*
+import com.example.util.BatteryOptimizationHelper
 
 @Composable
 fun DashboardScreen(
@@ -47,6 +52,9 @@ fun DashboardScreen(
     onNavigateToActivity: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     val syncState by viewModel.syncState.collectAsState()
     val account by viewModel.account.collectAsState()
     val folders by viewModel.folders.collectAsState()
@@ -55,6 +63,20 @@ fun DashboardScreen(
     val settings by viewModel.settings.collectAsState()
     val serverStatus by viewModel.serverConnectionStatus.collectAsState()
     val isTestingConnection by viewModel.isTestingConnection.collectAsState()
+    val isBatteryOptimizationIgnored by viewModel.batteryOptimizationIgnored.collectAsState()
+    val isNotificationPermissionGranted by viewModel.notificationPermissionGranted.collectAsState()
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshAllSystemStates()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "sync_spin")
     val rotation by infiniteTransition.animateFloat(
@@ -97,6 +119,76 @@ fun DashboardScreen(
             )
         }
 
+        // Background Persistence & Memory Protection Alert (if system could kill app)
+        if (!isBatteryOptimizationIgnored || !isNotificationPermissionGranted) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = NcWarningAmber.copy(alpha = 0.12f)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NcWarningAmber.copy(alpha = 0.4f)),
+                    modifier = Modifier.fillMaxWidth().testTag("background_kill_warning_banner")
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Filled.BatterySaver,
+                                contentDescription = null,
+                                tint = NcWarningAmber,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Enable Background Persistence",
+                                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                    color = NcWarningAmber
+                                )
+                                Text(
+                                    text = if (!isBatteryOptimizationIgnored)
+                                        "Android may stop background sync when you open other apps. Set battery to 'Unrestricted'."
+                                    else
+                                        "Allow notifications so the sync daemon stays alive in the background.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            if (!isBatteryOptimizationIgnored) {
+                                Button(
+                                    onClick = { BatteryOptimizationHelper.requestIgnoreBatteryOptimization(context) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NcWarningAmber),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Unrestrict Battery", color = Color.Black, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
+                            } else if (!isNotificationPermissionGranted) {
+                                Button(
+                                    onClick = { BatteryOptimizationHelper.openNotificationSettings(context) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                                    shape = RoundedCornerShape(8.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                                ) {
+                                    Text("Allow Notifications", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // 3. Conflict Alert Banner (if any)
         if (conflicts.isNotEmpty()) {
             item {
@@ -111,6 +203,7 @@ fun DashboardScreen(
         item {
             BackgroundSyncScheduleCard(
                 settings = settings,
+                isBatteryUnrestricted = isBatteryOptimizationIgnored,
                 onSettingsClick = onNavigateToSettings
             )
         }
@@ -498,6 +591,7 @@ private fun ConflictAlertBanner(
 @Composable
 private fun BackgroundSyncScheduleCard(
     settings: SyncSettingsEntity?,
+    isBatteryUnrestricted: Boolean = true,
     onSettingsClick: () -> Unit
 ) {
     val intervalVal = settings?.syncIntervalValue ?: 15
@@ -510,51 +604,84 @@ private fun BackgroundSyncScheduleCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
         modifier = Modifier.fillMaxWidth().testTag("background_sync_card")
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
+                .padding(16.dp)
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Schedule,
-                        contentDescription = "Sync schedule",
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(20.dp)
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Schedule,
+                            contentDescription = "Sync schedule",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Sync Interval: Every $intervalVal $intervalUnit",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = if (isBgActive) "Next sync: ${FormatUtils.formatScheduledTime(nextScheduled)}" else "Background sync disabled",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = "Sync Interval: Every $intervalVal $intervalUnit",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = if (isBgActive) "Next sync: ${FormatUtils.formatScheduledTime(nextScheduled)}" else "Background sync disabled",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                TextButton(
+                    onClick = onSettingsClick,
+                    modifier = Modifier.testTag("change_interval_btn")
+                ) {
+                    Text("Settings", fontWeight = FontWeight.SemiBold)
                 }
             }
 
-            TextButton(
-                onClick = onSettingsClick,
-                modifier = Modifier.testTag("change_interval_btn")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Daemon status indicator tag
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(
+                        if (isBgActive && isBatteryUnrestricted) NcSuccessGreen.copy(alpha = 0.1f)
+                        else NcWarningAmber.copy(alpha = 0.12f)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
-                Text("Change", fontWeight = FontWeight.SemiBold)
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(if (isBgActive && isBatteryUnrestricted) NcSuccessGreen else NcWarningAmber)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (isBgActive && isBatteryUnrestricted) "Persistent Daemon: Active (Memory Protected)"
+                    else if (isBgActive) "Persistent Daemon: Running (Battery Optimization Active)"
+                    else "Background Daemon: Disabled",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isBgActive && isBatteryUnrestricted) NcSuccessGreen else NcWarningAmber
+                )
             }
         }
     }

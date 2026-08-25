@@ -7,6 +7,9 @@ import com.example.NextcloudApp
 import com.example.data.model.*
 import com.example.data.repository.ConflictResolution
 import com.example.sync.SyncProgressState
+import com.example.sync.service.NextcloudSyncForegroundService
+import com.example.util.BatteryOptimizationHelper
+import com.example.util.StoragePermissionHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -51,27 +54,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
-    private val _storagePermissionGranted = MutableStateFlow(com.example.util.StoragePermissionHelper.hasStoragePermission(app))
+    private val _storagePermissionGranted = MutableStateFlow(StoragePermissionHelper.hasStoragePermission(app))
     val storagePermissionGranted: StateFlow<Boolean> = _storagePermissionGranted.asStateFlow()
 
+    private val _batteryOptimizationIgnored = MutableStateFlow(BatteryOptimizationHelper.isBatteryOptimizationIgnored(app))
+    val batteryOptimizationIgnored: StateFlow<Boolean> = _batteryOptimizationIgnored.asStateFlow()
+
+    private val _notificationPermissionGranted = MutableStateFlow(BatteryOptimizationHelper.isNotificationPermissionGranted(app))
+    val notificationPermissionGranted: StateFlow<Boolean> = _notificationPermissionGranted.asStateFlow()
+
+    private val _exactAlarmAllowed = MutableStateFlow(BatteryOptimizationHelper.canScheduleExactAlarms(app))
+    val exactAlarmAllowed: StateFlow<Boolean> = _exactAlarmAllowed.asStateFlow()
+
     init {
-        refreshStoragePermissionState()
+        refreshAllSystemStates()
         refreshLocalFiles()
         checkConnection()
     }
 
+    fun refreshAllSystemStates() {
+        _storagePermissionGranted.value = StoragePermissionHelper.hasStoragePermission(app)
+        _batteryOptimizationIgnored.value = BatteryOptimizationHelper.isBatteryOptimizationIgnored(app)
+        _notificationPermissionGranted.value = BatteryOptimizationHelper.isNotificationPermissionGranted(app)
+        _exactAlarmAllowed.value = BatteryOptimizationHelper.canScheduleExactAlarms(app)
+    }
+
     fun refreshStoragePermissionState() {
-        _storagePermissionGranted.value = com.example.util.StoragePermissionHelper.hasStoragePermission(app)
+        refreshAllSystemStates()
     }
 
     fun hasStoragePermission(): Boolean {
-        val granted = com.example.util.StoragePermissionHelper.hasStoragePermission(app)
+        val granted = StoragePermissionHelper.hasStoragePermission(app)
         _storagePermissionGranted.value = granted
         return granted
     }
 
     fun isPathRequiringPermission(path: String): Boolean {
-        return com.example.util.StoragePermissionHelper.isExternalPath(path, app)
+        return StoragePermissionHelper.isExternalPath(path, app)
     }
 
     fun clearStatusMessage() {
@@ -155,10 +174,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.updateRunInBackground(enabled)
             if (enabled) {
                 syncScheduler.scheduleNextSync()
+                try {
+                    NextcloudSyncForegroundService.startPersistentDaemon(app)
+                } catch (e: Exception) {
+                    // Ignore foreground service startup exception
+                }
+                _statusMessage.value = "Persistent background sync daemon enabled"
             } else {
                 syncScheduler.cancelScheduledSync()
+                _statusMessage.value = "Background sync disabled"
             }
-            _statusMessage.value = if (enabled) "Background sync enabled" else "Background sync disabled"
+        }
+    }
+
+    fun startPersistentForegroundDaemon() {
+        try {
+            NextcloudSyncForegroundService.startPersistentDaemon(app)
+            _statusMessage.value = "Background sync keep-alive service started"
+        } catch (e: Exception) {
+            _statusMessage.value = "Failed to start service: ${e.message}"
         }
     }
 
