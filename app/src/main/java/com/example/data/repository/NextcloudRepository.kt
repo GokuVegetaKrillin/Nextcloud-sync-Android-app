@@ -35,16 +35,16 @@ class NextcloudRepository(private val context: Context) {
         val defaultDir = File(context.filesDir, "Nextcloud")
         try {
             val settings = kotlinx.coroutines.runBlocking(Dispatchers.IO) { settingsDao.getSettings() }
-            val custom = settings?.customLocalSyncPath
+            val custom = settings?.customLocalSyncPath?.trim()
             if (!custom.isNullOrBlank()) {
                 val dir = File(custom)
-                if (!dir.exists()) dir.mkdirs()
-                if (dir.exists() && dir.canWrite()) {
-                    return dir
+                if (!dir.exists()) {
+                    dir.mkdirs()
                 }
+                return dir
             }
         } catch (e: Exception) {
-            // Fallback to default internal app directory
+            // Fallback to default internal app directory if read error occurs
         }
         if (!defaultDir.exists()) defaultDir.mkdirs()
         return defaultDir

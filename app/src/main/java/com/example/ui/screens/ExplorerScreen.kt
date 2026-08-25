@@ -152,7 +152,58 @@ fun ExplorerScreen(
                 }
             }
 
-            Spacer(modifier = Modifier.height(12.dp))
+            // Storage permission warning banner in explorer
+            val isPermGranted by viewModel.storagePermissionGranted.collectAsState()
+            val effectivePath = viewModel.getEffectiveLocalSyncPath()
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val isPathExternal = remember(effectivePath) {
+                com.example.util.StoragePermissionHelper.isExternalPath(effectivePath, context)
+            }
+
+            if (isPathExternal && !isPermGranted) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = NcWarningAmber.copy(alpha = 0.12f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, NcWarningAmber.copy(alpha = 0.5f)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = NcWarningAmber,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Storage Permission Required",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = NcWarningAmber
+                            )
+                            Text(
+                                text = "All Files Access is needed to read and write to $effectivePath.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                com.example.util.StoragePermissionHelper.openStoragePermissionSettings(context)
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NcWarningAmber),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("Grant", color = Color.Black, style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                        }
+                    }
+                }
+            }
 
             // File items
             if (localFiles.isEmpty()) {

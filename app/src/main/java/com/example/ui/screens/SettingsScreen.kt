@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.os.Build
 import android.os.Environment
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -15,6 +16,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -23,20 +26,42 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.example.data.model.ConflictStrategy
 import com.example.data.model.SyncIntervalUnit
 import com.example.ui.MainViewModel
 import com.example.ui.theme.*
+import com.example.util.StoragePermissionHelper
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     viewModel: MainViewModel
 ) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
     val account by viewModel.account.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val serverStatus by viewModel.serverConnectionStatus.collectAsState()
     val isTestingConnection by viewModel.isTestingConnection.collectAsState()
+    val isStoragePermissionGranted by viewModel.storagePermissionGranted.collectAsState()
+
+    // Observe app lifecycle so returning from Android System Settings instantly refreshes permissions & status
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshStoragePermissionState()
+                viewModel.refreshLocalFiles()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     // Local states for inputs
     var serverUrlInput by remember(account?.serverUrl) { mutableStateOf(account?.serverUrl ?: "https://cloud.example.com") }
@@ -55,9 +80,77 @@ fun SettingsScreen(
         mutableStateOf(settings?.syncIntervalUnit ?: SyncIntervalUnit.MINUTES)
     }
 
-    // Local Folder Configuration
+    // Local Folder Configuration Input
     var customPathInput by remember(settings?.customLocalSyncPath) {
         mutableStateOf(settings?.customLocalSyncPath ?: "")
+    }
+
+    var showPermissionRequestDialog by remember { mutableStateOf(false) }
+
+    // Effective active directory
+    val effectivePath = remember(settings?.customLocalSyncPath) {
+        val custom = settings?.customLocalSyncPath?.trim()
+        if (!custom.isNullOrEmpty()) custom else viewModel.getDefaultInternalPath()
+    }
+    val isPathExternal = remember(effectivePath) {
+        StoragePermissionHelper.isExternalPath(effectivePath, context)
+    }
+
+    // Permission Prompt Dialog
+    if (showPermissionRequestDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionRequestDialog = false },
+            icon = {
+                Icon(Icons.Filled.FolderSpecial, contentDescription = null, tint = NcPrimaryBlue, modifier = Modifier.size(32.dp))
+            },
+            title = {
+                Text("Storage Access Permission Required", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold))
+            },
+            text = {
+                Column {
+                    Text(
+                        "Nextcloud Sync is set to store files in:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = effectivePath,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = NcPrimaryBlue,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        "To create, sync, and make these files accessible to your Android file manager and apps without root, please allow 'All files access' in Android settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPermissionRequestDialog = false
+                        StoragePermissionHelper.openStoragePermissionSettings(context)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Grant Permission")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionRequestDialog = false }) {
+                    Text("Not Now")
+                }
+            }
+        )
     }
 
     LazyColumn(
@@ -89,7 +182,7 @@ fun SettingsScreen(
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
-                                text = "Choose where synchronized Nextcloud files are stored on this device",
+                                text = "Choose where synchronized Nextcloud files are saved on this device",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -99,7 +192,6 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.height(14.dp))
 
                     // Current Active Location Info Box
-                    val effectivePath = viewModel.getEffectiveLocalSyncPath()
                     Surface(
                         shape = RoundedCornerShape(10.dp),
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
@@ -125,17 +217,92 @@ fun SettingsScreen(
                                 text = effectivePath,
                                 style = MaterialTheme.typography.bodySmall.copy(
                                     fontFamily = FontFamily.Monospace,
-                                    fontSize = 12.sp
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold
                                 ),
                                 color = NcPrimaryBlue
                             )
                         }
                     }
 
+                    // Storage Permission Status Banner if using external path
+                    if (isPathExternal) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        if (!isStoragePermissionGranted) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = NcWarningAmber.copy(alpha = 0.12f),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, NcWarningAmber.copy(alpha = 0.5f)),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            Icons.Filled.Warning,
+                                            contentDescription = null,
+                                            tint = NcWarningAmber,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "Storage Permission Required",
+                                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = NcWarningAmber
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Nextcloud Sync needs 'All Files Access' to create and save files to shared storage ($effectivePath) so they are visible in your file manager without root.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Button(
+                                        onClick = {
+                                            StoragePermissionHelper.openStoragePermissionSettings(context)
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = NcWarningAmber),
+                                        shape = RoundedCornerShape(8.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier.fillMaxWidth().testTag("grant_storage_perm_btn")
+                                    ) {
+                                        Icon(Icons.Filled.LockOpen, contentDescription = null, modifier = Modifier.size(16.dp), tint = Color.Black)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Grant Storage Access Permission", color = Color.Black, style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold))
+                                    }
+                                }
+                            }
+                        } else {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = NcSuccessGreen.copy(alpha = 0.12f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(10.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.CheckCircle,
+                                        contentDescription = null,
+                                        tint = NcSuccessGreen,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Storage permission active: Writable without root",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                        color = NcSuccessGreen
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     Spacer(modifier = Modifier.height(14.dp))
 
                     Text(
-                        text = "Quick Presets:",
+                        text = "Quick Presets (Accessible without root):",
                         style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
                     )
 
@@ -143,56 +310,101 @@ fun SettingsScreen(
 
                     // Quick Preset Buttons
                     val defaultInternal = viewModel.getDefaultInternalPath()
+                    val sharedNextcloud = viewModel.getSharedStorageNextcloudPath()
                     val extDocs = viewModel.getExternalDocumentsPath()
                     val extDownloads = viewModel.getExternalDownloadPath()
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                customPathInput = ""
-                                viewModel.updateCustomLocalSyncPath("")
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (customPathInput.isEmpty()) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
-                            ),
-                            modifier = Modifier.weight(1f).testTag("preset_default_storage_btn")
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Default App Storage", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            OutlinedButton(
+                                onClick = {
+                                    customPathInput = sharedNextcloud
+                                    viewModel.updateCustomLocalSyncPath(sharedNextcloud)
+                                    if (!isStoragePermissionGranted) {
+                                        showPermissionRequestDialog = true
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (effectivePath == sharedNextcloud) NcPrimaryBlue.copy(alpha = 0.15f) else Color.Transparent
+                                ),
+                                modifier = Modifier.weight(1f).testTag("preset_shared_storage_btn")
+                            ) {
+                                Icon(Icons.Outlined.FolderShared, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Shared Storage (/sdcard/Nextcloud)", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
                         }
 
-                        OutlinedButton(
-                            onClick = {
-                                customPathInput = extDocs
-                                viewModel.updateCustomLocalSyncPath(extDocs)
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (customPathInput == extDocs) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
-                            ),
-                            modifier = Modifier.weight(1f).testTag("preset_docs_storage_btn")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Documents", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            OutlinedButton(
+                                onClick = {
+                                    customPathInput = extDocs
+                                    viewModel.updateCustomLocalSyncPath(extDocs)
+                                    if (!isStoragePermissionGranted) {
+                                        showPermissionRequestDialog = true
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (effectivePath == extDocs) NcPrimaryBlue.copy(alpha = 0.15f) else Color.Transparent
+                                ),
+                                modifier = Modifier.weight(1f).testTag("preset_docs_storage_btn")
+                            ) {
+                                Icon(Icons.Outlined.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Documents", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    customPathInput = extDownloads
+                                    viewModel.updateCustomLocalSyncPath(extDownloads)
+                                    if (!isStoragePermissionGranted) {
+                                        showPermissionRequestDialog = true
+                                    }
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (effectivePath == extDownloads) NcPrimaryBlue.copy(alpha = 0.15f) else Color.Transparent
+                                ),
+                                modifier = Modifier.weight(1f).testTag("preset_downloads_storage_btn")
+                            ) {
+                                Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Downloads", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
                         }
 
-                        OutlinedButton(
-                            onClick = {
-                                customPathInput = extDownloads
-                                viewModel.updateCustomLocalSyncPath(extDownloads)
-                            },
-                            shape = RoundedCornerShape(8.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (customPathInput == extDownloads) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
-                            ),
-                            modifier = Modifier.weight(1f).testTag("preset_downloads_storage_btn")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Downloads", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            OutlinedButton(
+                                onClick = {
+                                    customPathInput = ""
+                                    viewModel.updateCustomLocalSyncPath("")
+                                },
+                                shape = RoundedCornerShape(8.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (effectivePath == defaultInternal) NcPrimaryBlue.copy(alpha = 0.15f) else Color.Transparent
+                                ),
+                                modifier = Modifier.weight(1f).testTag("preset_default_storage_btn")
+                            ) {
+                                Icon(Icons.Outlined.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("App Internal Sandbox", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                            }
                         }
                     }
 
@@ -202,13 +414,13 @@ fun SettingsScreen(
                         value = customPathInput,
                         onValueChange = { customPathInput = it },
                         label = { Text("Custom Absolute Directory Path") },
-                        placeholder = { Text(defaultInternal) },
+                        placeholder = { Text(sharedNextcloud) },
                         singleLine = true,
                         leadingIcon = {
                             Icon(Icons.Outlined.FolderOpen, contentDescription = null)
                         },
                         supportingText = {
-                            Text("Leave blank to use default internal sandbox ($defaultInternal)")
+                            Text("e.g. $sharedNextcloud or $extDocs")
                         },
                         modifier = Modifier.fillMaxWidth().testTag("custom_sync_path_input")
                     )
@@ -229,12 +441,16 @@ fun SettingsScreen(
                         ) {
                             Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Reset Default")
+                            Text("Reset Sandbox")
                         }
 
                         Button(
                             onClick = {
-                                viewModel.updateCustomLocalSyncPath(customPathInput.trim())
+                                val target = customPathInput.trim()
+                                viewModel.updateCustomLocalSyncPath(target)
+                                if (target.isNotEmpty() && StoragePermissionHelper.isExternalPath(target, context) && !isStoragePermissionGranted) {
+                                    showPermissionRequestDialog = true
+                                }
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
                             shape = RoundedCornerShape(8.dp),

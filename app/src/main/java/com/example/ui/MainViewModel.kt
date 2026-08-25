@@ -51,9 +51,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusMessage = MutableStateFlow<String?>(null)
     val statusMessage: StateFlow<String?> = _statusMessage.asStateFlow()
 
+    private val _storagePermissionGranted = MutableStateFlow(com.example.util.StoragePermissionHelper.hasStoragePermission(app))
+    val storagePermissionGranted: StateFlow<Boolean> = _storagePermissionGranted.asStateFlow()
+
     init {
+        refreshStoragePermissionState()
         refreshLocalFiles()
         checkConnection()
+    }
+
+    fun refreshStoragePermissionState() {
+        _storagePermissionGranted.value = com.example.util.StoragePermissionHelper.hasStoragePermission(app)
+    }
+
+    fun hasStoragePermission(): Boolean {
+        val granted = com.example.util.StoragePermissionHelper.hasStoragePermission(app)
+        _storagePermissionGranted.value = granted
+        return granted
+    }
+
+    fun isPathRequiringPermission(path: String): Boolean {
+        return com.example.util.StoragePermissionHelper.isExternalPath(path, app)
     }
 
     fun clearStatusMessage() {
@@ -144,6 +162,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun getSharedStorageNextcloudPath(): String {
+        val ext = android.os.Environment.getExternalStorageDirectory()
+        return File(ext, "Nextcloud").absolutePath
+    }
+
     fun getDefaultInternalPath(): String {
         return File(app.filesDir, "Nextcloud").absolutePath
     }
@@ -159,15 +182,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun getEffectiveLocalSyncPath(): String {
-        return repository.localSyncRootDir.absolutePath
+        val custom = settings.value?.customLocalSyncPath?.trim()
+        return if (!custom.isNullOrEmpty()) custom else getDefaultInternalPath()
     }
 
     fun updateCustomLocalSyncPath(newPath: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.updateCustomLocalSyncPath(newPath)
+            val clean = newPath.trim()
+            repository.updateCustomLocalSyncPath(clean)
+            if (clean.isNotEmpty()) {
+                try {
+                    val dir = File(clean)
+                    if (!dir.exists()) dir.mkdirs()
+                } catch (e: Exception) {
+                    // Handled gracefully
+                }
+            }
             refreshLocalFiles()
-            _statusMessage.value = if (newPath.isBlank()) "Local storage path reset to default"
-                                   else "Local storage path updated to: $newPath"
+            refreshStoragePermissionState()
+            _statusMessage.value = if (clean.isBlank()) "Local storage path reset to default"
+                                   else "Local storage path set to: $clean"
         }
     }
 
