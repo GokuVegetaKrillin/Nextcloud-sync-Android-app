@@ -5,6 +5,7 @@ import com.example.data.local.AppDatabase
 import com.example.data.model.*
 import com.example.data.remote.MockNextcloudServer
 import com.example.data.remote.NextcloudClient
+import com.example.util.FileTimeHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -313,10 +314,20 @@ class NextcloudRepository(private val context: Context) {
 
         when (resolution) {
             ConflictResolution.KEEP_LOCAL -> {
+                // If localFile was previously renamed to conflict copy in ASK_USER, restore it
+                if (!localFile.exists() && conflict.conflictLocalFileName.isNotEmpty()) {
+                    val conflictCopy = File(localFile.parentFile, conflict.conflictLocalFileName)
+                    if (conflictCopy.exists()) {
+                        conflictCopy.renameTo(localFile)
+                    }
+                }
+
                 // Upload local to remote, overwrite remote
+                var newEtag = conflict.remoteEtag
                 if (localFile.exists()) {
-                    if (account.isSimulatedDemo) {
-                        mockServer.uploadFile(conflict.remotePath, localFile, localFile.lastModified())
+                    newEtag = if (account.isSimulatedDemo) {
+                        mockServer.uploadFile(conflict.remotePath, localFile, localFile.lastModified()).getOrNull()
+                            ?: "etag_${System.currentTimeMillis()}"
                     } else {
                         nextcloudClient.uploadFile(
                             account.serverUrl,
@@ -326,9 +337,31 @@ class NextcloudRepository(private val context: Context) {
                             localFile,
                             localFile.lastModified(),
                             account.trustAllCerts
-                        )
+                        ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
                     }
                 }
+
+                // Record in sync journal so subsequent sync cycles know local & remote match perfectly
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = conflict.remotePath,
+                        localRelativePath = conflict.localRelativePath,
+                        isDirectory = false,
+                        remoteEtag = newEtag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = localFile.lastModified(),
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = ""
+                    )
+                )
+
+                // Clean up conflict copy if present
+                if (conflict.conflictLocalFileName.isNotEmpty()) {
+                    val conflictCopy = File(localFile.parentFile, conflict.conflictLocalFileName)
+                    if (conflictCopy.exists()) conflictCopy.delete()
+                }
+
                 logActivity(
                     type = ActivityType.CONFLICT_RESOLVED,
                     path = remotePath,
@@ -337,8 +370,8 @@ class NextcloudRepository(private val context: Context) {
             }
             ConflictResolution.KEEP_REMOTE -> {
                 // Download remote and overwrite local
-                if (account.isSimulatedDemo) {
-                    mockServer.downloadFile(conflict.remotePath, localFile)
+                val etag = if (account.isSimulatedDemo) {
+                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull() ?: conflict.remoteEtag
                 } else {
                     nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -347,33 +380,60 @@ class NextcloudRepository(private val context: Context) {
                         conflict.remotePath,
                         localFile,
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: conflict.remoteEtag
                 }
+
+                // CRITICAL: Synchronize local file modification timestamp to match server timestamp
+                if (conflict.remoteMtime > 0L) {
+                    FileTimeHelper.setLastModified(localFile, conflict.remoteMtime)
+                }
+
+                // Synchronize sync journal with exact file timestamps to prevent duplicate conflict detection
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = conflict.remotePath,
+                        localRelativePath = conflict.localRelativePath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = conflict.remoteMtime,
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = ""
+                    )
+                )
+
+                // Clean up conflict copy file if present
+                if (conflict.conflictLocalFileName.isNotEmpty()) {
+                    val conflictCopy = File(localFile.parentFile, conflict.conflictLocalFileName)
+                    if (conflictCopy.exists()) conflictCopy.delete()
+                }
+
                 logActivity(
                     type = ActivityType.CONFLICT_RESOLVED,
                     path = remotePath,
-                    message = "Conflict resolved: Overwrote local file with Nextcloud server copy."
+                    message = "Conflict resolved: Overwrote local file with Nextcloud server copy (modification date synchronized)."
                 )
             }
             ConflictResolution.KEEP_BOTH -> {
-                // Keep both by renaming local to conflict format and downloading remote
-                val timestampStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val dotIndex = localFile.name.lastIndexOf('.')
-                val conflictName = if (dotIndex != -1) {
-                    val base = localFile.name.substring(0, dotIndex)
-                    val ext = localFile.name.substring(dotIndex)
-                    "$base (conflicted copy $timestampStr)$ext"
-                } else {
-                    "${localFile.name} (conflicted copy $timestampStr)"
-                }
-                val conflictLocalFile = File(localFile.parentFile, conflictName)
-                if (localFile.exists()) {
+                // Preserve both files: local remains as conflicted copy, download remote to main filename
+                if (conflict.conflictLocalFileName.isEmpty() && localFile.exists()) {
+                    val timestampStr = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    val dotIndex = localFile.name.lastIndexOf('.')
+                    val conflictName = if (dotIndex != -1) {
+                        val base = localFile.name.substring(0, dotIndex)
+                        val ext = localFile.name.substring(dotIndex)
+                        "$base (conflicted copy $timestampStr)$ext"
+                    } else {
+                        "${localFile.name} (conflicted copy $timestampStr)"
+                    }
+                    val conflictLocalFile = File(localFile.parentFile, conflictName)
                     localFile.renameTo(conflictLocalFile)
                 }
 
                 // Download original remote
-                if (account.isSimulatedDemo) {
-                    mockServer.downloadFile(conflict.remotePath, localFile)
+                val etag = if (account.isSimulatedDemo) {
+                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull() ?: conflict.remoteEtag
                 } else {
                     nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -382,12 +442,33 @@ class NextcloudRepository(private val context: Context) {
                         conflict.remotePath,
                         localFile,
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: conflict.remoteEtag
                 }
+
+                // Synchronize local file modification timestamp to match server timestamp
+                if (conflict.remoteMtime > 0L) {
+                    FileTimeHelper.setLastModified(localFile, conflict.remoteMtime)
+                }
+
+                // Synchronize sync journal
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = conflict.remotePath,
+                        localRelativePath = conflict.localRelativePath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = conflict.remoteMtime,
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = ""
+                    )
+                )
+
                 logActivity(
                     type = ActivityType.CONFLICT_RESOLVED,
                     path = remotePath,
-                    message = "Conflict resolved: Preserved both files (created '$conflictName')."
+                    message = "Conflict resolved: Preserved both files (server copy modification date synchronized)."
                 )
             }
         }

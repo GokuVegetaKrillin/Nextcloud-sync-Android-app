@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.data.local.AppDatabase
 import com.example.data.model.*
 import com.example.data.repository.NextcloudRepository
+import com.example.util.FileTimeHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -348,6 +349,9 @@ class SyncEngine(
                                     account.trustAllCerts
                                 ).getOrNull() ?: remote.etag
                             }
+                            if (remote.lastModified > 0L) {
+                                FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
+                            }
                             bytesTransferred += targetLocalFile.length()
                             journalDao.insertOrUpdate(
                                 SyncJournalEntryEntity(
@@ -414,6 +418,9 @@ class SyncEngine(
                                     targetLocalFile,
                                     account.trustAllCerts
                                 ).getOrNull() ?: remote.etag
+                            }
+                            if (remote.lastModified > 0L) {
+                                FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
                             }
                             bytesTransferred += targetLocalFile.length()
                             journalDao.insertOrUpdate(
@@ -571,10 +578,12 @@ class SyncEngine(
             ConflictStrategy.ASK_USER -> {
                 // Record in conflict table & rename local to conflict copy, download remote
                 val conflictCopy = File(localFile.parentFile, conflictName)
+                val origLocalMtime = localFile.lastModified()
+                val origLocalSize = localFile.length()
                 localFile.renameTo(conflictCopy)
 
-                if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile)
+                val etag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -583,15 +592,18 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: remote.etag
+                }
+                if (remote.lastModified > 0L) {
+                    FileTimeHelper.setLastModified(localFile, remote.lastModified)
                 }
 
                 conflictDao.insertConflict(
                     ConflictEntity(
                         remotePath = path,
                         localRelativePath = relativeLocalPath,
-                        localMtime = localFile.lastModified(),
-                        localSize = localFile.length(),
+                        localMtime = origLocalMtime,
+                        localSize = origLocalSize,
                         remoteEtag = remote.etag,
                         remoteMtime = remote.lastModified,
                         remoteSize = remote.size,
@@ -600,17 +612,32 @@ class SyncEngine(
                     )
                 )
 
+                // Store journal entry for the newly downloaded server file so background sync doesn't re-trigger conflict
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = path,
+                        localRelativePath = relativeLocalPath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = remote.lastModified,
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = remote.fileId ?: ""
+                    )
+                )
+
                 repository.logActivity(
                     ActivityType.CONFLICT_DETECTED,
                     path,
-                    "Conflict detected on '$path'. Created '$conflictName'."
+                    "Conflict detected on '$path'. Server copy synced (mtime preserved), local copy preserved as '$conflictName'."
                 )
             }
             ConflictStrategy.KEEP_BOTH_RENAME -> {
                 val conflictCopy = File(localFile.parentFile, conflictName)
                 localFile.renameTo(conflictCopy)
-                if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile)
+                val etag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -619,8 +646,24 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: remote.etag
                 }
+                if (remote.lastModified > 0L) {
+                    FileTimeHelper.setLastModified(localFile, remote.lastModified)
+                }
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = path,
+                        localRelativePath = relativeLocalPath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = remote.lastModified,
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = remote.fileId ?: ""
+                    )
+                )
                 repository.logActivity(
                     ActivityType.CONFLICT_RESOLVED,
                     path,
@@ -628,8 +671,9 @@ class SyncEngine(
                 )
             }
             ConflictStrategy.PREFER_LOCAL -> {
-                if (account.isSimulatedDemo) {
-                    repository.mockServer.uploadFile(path, localFile, localFile.lastModified())
+                val etag = if (account.isSimulatedDemo) {
+                    repository.mockServer.uploadFile(path, localFile, localFile.lastModified()).getOrNull()
+                        ?: "etag_${System.currentTimeMillis()}"
                 } else {
                     repository.nextcloudClient.uploadFile(
                         account.serverUrl,
@@ -639,13 +683,26 @@ class SyncEngine(
                         localFile,
                         localFile.lastModified(),
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
                 }
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = path,
+                        localRelativePath = relativeLocalPath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = localFile.lastModified(),
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = remote.fileId ?: ""
+                    )
+                )
                 repository.logActivity(ActivityType.CONFLICT_RESOLVED, path, "Conflict resolved (Kept local file)")
             }
             ConflictStrategy.PREFER_REMOTE -> {
-                if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile)
+                val etag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -654,8 +711,24 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    )
+                    ).getOrNull() ?: remote.etag
                 }
+                if (remote.lastModified > 0L) {
+                    FileTimeHelper.setLastModified(localFile, remote.lastModified)
+                }
+                journalDao.insertOrUpdate(
+                    SyncJournalEntryEntity(
+                        remotePath = path,
+                        localRelativePath = relativeLocalPath,
+                        isDirectory = false,
+                        remoteEtag = etag,
+                        remoteSize = localFile.length(),
+                        remoteMtime = remote.lastModified,
+                        localSize = localFile.length(),
+                        localMtime = localFile.lastModified(),
+                        fileId = remote.fileId ?: ""
+                    )
+                )
                 repository.logActivity(ActivityType.CONFLICT_RESOLVED, path, "Conflict resolved (Kept Nextcloud remote)")
             }
         }

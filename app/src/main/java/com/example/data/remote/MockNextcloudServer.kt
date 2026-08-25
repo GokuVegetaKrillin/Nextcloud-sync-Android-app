@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.data.model.ServerStatus
 import com.example.data.model.WebDavItem
 import com.example.data.model.WebDavQuota
+import com.example.util.FileTimeHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -151,7 +152,7 @@ class MockNextcloudServer(private val context: Context) {
                     input.copyTo(output)
                 }
             }
-            destFile.setLastModified(source.lastModified())
+            FileTimeHelper.setLastModified(destFile, source.lastModified())
             val etag = "etag_${source.lastModified()}_${source.length()}"
             Result.success(etag)
         } catch (e: Exception) {
@@ -170,7 +171,7 @@ class MockNextcloudServer(private val context: Context) {
                     input.copyTo(output)
                 }
             }
-            target.setLastModified(mtime)
+            FileTimeHelper.setLastModified(target, mtime)
             val etag = "etag_${target.lastModified()}_${target.length()}"
             Result.success(etag)
         } catch (e: Exception) {
