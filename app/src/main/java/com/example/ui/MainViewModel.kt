@@ -144,6 +144,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun getDefaultInternalPath(): String {
+        return File(app.filesDir, "Nextcloud").absolutePath
+    }
+
+    fun getExternalDocumentsPath(): String {
+        val ext = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOCUMENTS)
+        return File(ext, "Nextcloud").absolutePath
+    }
+
+    fun getExternalDownloadPath(): String {
+        val ext = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+        return File(ext, "Nextcloud").absolutePath
+    }
+
+    fun getEffectiveLocalSyncPath(): String {
+        return repository.localSyncRootDir.absolutePath
+    }
+
+    fun updateCustomLocalSyncPath(newPath: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateCustomLocalSyncPath(newPath)
+            refreshLocalFiles()
+            _statusMessage.value = if (newPath.isBlank()) "Local storage path reset to default"
+                                   else "Local storage path updated to: $newPath"
+        }
+    }
+
     fun updateServerAddress(newServerUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
             _isTestingConnection.value = true

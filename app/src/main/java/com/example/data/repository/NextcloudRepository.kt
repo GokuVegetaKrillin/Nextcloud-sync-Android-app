@@ -31,11 +31,27 @@ class NextcloudRepository(private val context: Context) {
     val conflictsFlow: Flow<List<ConflictEntity>> = conflictDao.getUnresolvedConflictsFlow()
     val settingsFlow: Flow<SyncSettingsEntity?> = settingsDao.getSettingsFlow()
 
-    val localSyncRootDir: File by lazy {
-        val dir = File(context.filesDir, "Nextcloud")
-        if (!dir.exists()) dir.mkdirs()
-        dir
+    fun resolveLocalSyncRootDir(): File {
+        val defaultDir = File(context.filesDir, "Nextcloud")
+        try {
+            val settings = kotlinx.coroutines.runBlocking(Dispatchers.IO) { settingsDao.getSettings() }
+            val custom = settings?.customLocalSyncPath
+            if (!custom.isNullOrBlank()) {
+                val dir = File(custom)
+                if (!dir.exists()) dir.mkdirs()
+                if (dir.exists() && dir.canWrite()) {
+                    return dir
+                }
+            }
+        } catch (e: Exception) {
+            // Fallback to default internal app directory
+        }
+        if (!defaultDir.exists()) defaultDir.mkdirs()
+        return defaultDir
     }
+
+    val localSyncRootDir: File
+        get() = resolveLocalSyncRootDir()
 
     suspend fun initializeDefaultsIfNeeded() = withContext(Dispatchers.IO) {
         // Init settings if missing
@@ -255,6 +271,17 @@ class NextcloudRepository(private val context: Context) {
 
     suspend fun updateRunInBackground(enabled: Boolean) = withContext(Dispatchers.IO) {
         settingsDao.updateRunInBackground(enabled)
+    }
+
+    suspend fun updateCustomLocalSyncPath(newPath: String) = withContext(Dispatchers.IO) {
+        val cleanPath = newPath.trim()
+        settingsDao.updateCustomLocalSyncPath(cleanPath)
+        logActivity(
+            type = ActivityType.INFO,
+            path = cleanPath.ifEmpty { "/data/user/0/com.aistudio.nextcloudsync/files/Nextcloud" },
+            message = if (cleanPath.isEmpty()) "Reset local sync location to default app storage."
+                      else "Changed local sync destination folder to: $cleanPath"
+        )
     }
 
     suspend fun updateSettings(settings: SyncSettingsEntity) = withContext(Dispatchers.IO) {

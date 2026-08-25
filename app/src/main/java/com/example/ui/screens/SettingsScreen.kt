@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.os.Build
+import android.os.Environment
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -14,11 +16,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.model.ConflictStrategy
 import com.example.data.model.SyncIntervalUnit
 import com.example.ui.MainViewModel
@@ -51,6 +55,11 @@ fun SettingsScreen(
         mutableStateOf(settings?.syncIntervalUnit ?: SyncIntervalUnit.MINUTES)
     }
 
+    // Local Folder Configuration
+    var customPathInput by remember(settings?.customLocalSyncPath) {
+        mutableStateOf(settings?.customLocalSyncPath ?: "")
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -58,7 +67,189 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp)
     ) {
-        // Section 1: Server Configuration (Editable Server Address)
+        // Section 1: Android Local Storage & Destination Directory
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                modifier = Modifier.fillMaxWidth().testTag("storage_location_card")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.Folder, contentDescription = null, tint = NcPrimaryBlue)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Android Local Storage Location",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                text = "Choose where synchronized Nextcloud files are stored on this device",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    // Current Active Location Info Box
+                    val effectivePath = viewModel.getEffectiveLocalSyncPath()
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Outlined.Storage,
+                                    contentDescription = null,
+                                    tint = NcPrimaryBlue,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Current Active Folder:",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = effectivePath,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 12.sp
+                                ),
+                                color = NcPrimaryBlue
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Text(
+                        text = "Quick Presets:",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Quick Preset Buttons
+                    val defaultInternal = viewModel.getDefaultInternalPath()
+                    val extDocs = viewModel.getExternalDocumentsPath()
+                    val extDownloads = viewModel.getExternalDownloadPath()
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                customPathInput = ""
+                                viewModel.updateCustomLocalSyncPath("")
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (customPathInput.isEmpty()) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f).testTag("preset_default_storage_btn")
+                        ) {
+                            Text("Default App Storage", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                customPathInput = extDocs
+                                viewModel.updateCustomLocalSyncPath(extDocs)
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (customPathInput == extDocs) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f).testTag("preset_docs_storage_btn")
+                        ) {
+                            Text("Documents", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                customPathInput = extDownloads
+                                viewModel.updateCustomLocalSyncPath(extDownloads)
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (customPathInput == extDownloads) NcPrimaryBlue.copy(alpha = 0.12f) else Color.Transparent
+                            ),
+                            modifier = Modifier.weight(1f).testTag("preset_downloads_storage_btn")
+                        ) {
+                            Text("Downloads", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    OutlinedTextField(
+                        value = customPathInput,
+                        onValueChange = { customPathInput = it },
+                        label = { Text("Custom Absolute Directory Path") },
+                        placeholder = { Text(defaultInternal) },
+                        singleLine = true,
+                        leadingIcon = {
+                            Icon(Icons.Outlined.FolderOpen, contentDescription = null)
+                        },
+                        supportingText = {
+                            Text("Leave blank to use default internal sandbox ($defaultInternal)")
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("custom_sync_path_input")
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                customPathInput = ""
+                                viewModel.updateCustomLocalSyncPath("")
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("reset_storage_path_btn")
+                        ) {
+                            Icon(Icons.Outlined.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Reset Default")
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.updateCustomLocalSyncPath(customPathInput.trim())
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("save_storage_path_btn")
+                        ) {
+                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Save Location")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 2: Server Configuration (Editable Server Address)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -232,7 +423,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 2: Custom Sync Interval (Arbitrary Minutes / Hours / Days)
+        // Section 3: Custom Sync Interval (Arbitrary Minutes / Hours / Days)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -336,7 +527,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 3: Sync Behavior (Sync New Folders By Default, Background Sync)
+        // Section 4: Sync Behavior (Sync New Folders By Default, Background Sync)
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -407,7 +598,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 4: Maintenance & Journal Reset
+        // Section 5: Maintenance & Journal Reset
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),

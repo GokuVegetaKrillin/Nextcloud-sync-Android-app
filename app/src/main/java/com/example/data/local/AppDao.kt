@@ -132,6 +132,9 @@ interface SyncSettingsDao {
     @Query("UPDATE sync_settings SET runInBackground = :enabled WHERE id = 1")
     suspend fun updateRunInBackground(enabled: Boolean)
 
+    @Query("UPDATE sync_settings SET customLocalSyncPath = :path WHERE id = 1")
+    suspend fun updateCustomLocalSyncPath(path: String)
+
     @Query("UPDATE sync_settings SET nextScheduledSyncTimestamp = :timestamp WHERE id = 1")
     suspend fun updateNextScheduledSync(timestamp: Long)
 

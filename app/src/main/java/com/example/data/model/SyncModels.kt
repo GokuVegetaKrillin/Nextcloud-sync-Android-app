@@ -148,5 +148,6 @@ data class SyncSettingsEntity(
     val maxSyncFileSizeMb: Int = 500,
     val notifyOnSyncComplete: Boolean = true,
     val lastManualSyncTimestamp: Long = 0L,
-    val nextScheduledSyncTimestamp: Long = 0L
+    val nextScheduledSyncTimestamp: Long = 0L,
+    val customLocalSyncPath: String = "" // Custom local folder path (empty means default app storage)
 )
