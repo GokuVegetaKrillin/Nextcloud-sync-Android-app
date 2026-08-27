@@ -66,6 +66,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _exactAlarmAllowed = MutableStateFlow(BatteryOptimizationHelper.canScheduleExactAlarms(app))
     val exactAlarmAllowed: StateFlow<Boolean> = _exactAlarmAllowed.asStateFlow()
 
+    private val _resolvingConflicts = MutableStateFlow<Set<String>>(emptySet())
+    val resolvingConflicts: StateFlow<Set<String>> = _resolvingConflicts.asStateFlow()
+
     init {
         refreshAllSystemStates()
         refreshLocalFiles()
@@ -291,11 +294,159 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateSyncEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateSyncEnabled(enabled)
+            if (enabled) {
+                syncScheduler.scheduleNextSync()
+                _statusMessage.value = "Master synchronization enabled"
+            } else {
+                syncScheduler.cancelScheduledSync()
+                _statusMessage.value = "Master synchronization paused"
+            }
+        }
+    }
+
+    fun updateIgnoreDotFiles(ignore: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateIgnoreDotFiles(ignore)
+            _statusMessage.value = if (ignore) {
+                "Hidden dot-files/folders (.thumbnails, etc.) will be ignored"
+            } else {
+                "Dot-files will be included in synchronization"
+            }
+        }
+    }
+
+    fun updateStallTimeout(timeoutSeconds: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val safeSec = timeoutSeconds.coerceAtLeast(30)
+            repository.updateStallTimeout(safeSec)
+            _statusMessage.value = "Transfer stall timeout set to $safeSec seconds (${safeSec / 60}m)"
+        }
+    }
+
     fun resolveConflict(remotePath: String, resolution: ConflictResolution) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.resolveConflict(remotePath, resolution)
+            _resolvingConflicts.update { it + remotePath }
+            try {
+                repository.resolveConflict(remotePath, resolution)
+                refreshLocalFiles()
+                _statusMessage.value = "Conflict resolved successfully ($remotePath)"
+            } catch (e: Exception) {
+                _statusMessage.value = "Failed to resolve conflict: ${e.message}"
+            } finally {
+                _resolvingConflicts.update { it - remotePath }
+            }
+        }
+    }
+
+    suspend fun exportSettingsJson(): String = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val acc = repository.getAccount()
+        val sett = repository.getSettings()
+        val folderList = repository.getAllFolders()
+
+        val root = org.json.JSONObject()
+        root.put("version", 2)
+        root.put("exportTimestamp", System.currentTimeMillis())
+
+        if (acc != null) {
+            val accObj = org.json.JSONObject()
+            accObj.put("serverUrl", acc.serverUrl)
+            accObj.put("username", acc.username)
+            accObj.put("passwordOrToken", acc.passwordOrToken)
+            accObj.put("displayName", acc.displayName)
+            accObj.put("trustAllCerts", acc.trustAllCerts)
+            accObj.put("isSimulatedDemo", acc.isSimulatedDemo)
+            root.put("account", accObj)
+        }
+
+        if (sett != null) {
+            val settObj = org.json.JSONObject()
+            settObj.put("isSyncEnabled", sett.isSyncEnabled)
+            settObj.put("syncIntervalValue", sett.syncIntervalValue)
+            settObj.put("syncIntervalUnit", sett.syncIntervalUnit.name)
+            settObj.put("syncNewFoldersByDefault", sett.syncNewFoldersByDefault)
+            settObj.put("runInBackground", sett.runInBackground)
+            settObj.put("customLocalSyncPath", sett.customLocalSyncPath)
+            settObj.put("ignoreDotFilesAndFolders", sett.ignoreDotFilesAndFolders)
+            settObj.put("transferStallTimeoutSeconds", sett.transferStallTimeoutSeconds)
+            settObj.put("conflictStrategy", sett.conflictStrategy.name)
+            root.put("settings", settObj)
+        }
+
+        val folderArray = org.json.JSONArray()
+        for (f in folderList) {
+            val fObj = org.json.JSONObject()
+            fObj.put("remotePath", f.remotePath)
+            fObj.put("localRelativePath", f.localRelativePath)
+            fObj.put("displayName", f.displayName)
+            fObj.put("isSelected", f.isSelected)
+            folderArray.put(fObj)
+        }
+        root.put("folders", folderArray)
+
+        root.toString(2)
+    }
+
+    suspend fun importSettingsJson(jsonStr: String): Result<String> = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        try {
+            val root = org.json.JSONObject(jsonStr.trim())
+
+            if (root.has("account")) {
+                val accObj = root.getJSONObject("account")
+                val acc = AccountEntity(
+                    serverUrl = accObj.optString("serverUrl", "https://cloud.example.com"),
+                    username = accObj.optString("username", "admin"),
+                    passwordOrToken = accObj.optString("passwordOrToken", ""),
+                    displayName = accObj.optString("displayName", "Nextcloud User"),
+                    trustAllCerts = accObj.optBoolean("trustAllCerts", true),
+                    isSimulatedDemo = accObj.optBoolean("isSimulatedDemo", true)
+                )
+                repository.saveAccount(acc)
+            }
+
+            if (root.has("settings")) {
+                val settObj = root.getJSONObject("settings")
+                val unitName = settObj.optString("syncIntervalUnit", SyncIntervalUnit.MINUTES.name)
+                val unit = try { SyncIntervalUnit.valueOf(unitName) } catch (_: Exception) { SyncIntervalUnit.MINUTES }
+                val stratName = settObj.optString("conflictStrategy", ConflictStrategy.ASK_USER.name)
+                val strat = try { ConflictStrategy.valueOf(stratName) } catch (_: Exception) { ConflictStrategy.ASK_USER }
+
+                val sett = SyncSettingsEntity(
+                    id = 1,
+                    isSyncEnabled = settObj.optBoolean("isSyncEnabled", true),
+                    syncIntervalValue = settObj.optInt("syncIntervalValue", 15),
+                    syncIntervalUnit = unit,
+                    syncNewFoldersByDefault = settObj.optBoolean("syncNewFoldersByDefault", true),
+                    runInBackground = settObj.optBoolean("runInBackground", true),
+                    customLocalSyncPath = settObj.optString("customLocalSyncPath", ""),
+                    ignoreDotFilesAndFolders = settObj.optBoolean("ignoreDotFilesAndFolders", true),
+                    transferStallTimeoutSeconds = settObj.optInt("transferStallTimeoutSeconds", 300),
+                    conflictStrategy = strat
+                )
+                repository.updateSettings(sett)
+            }
+
+            if (root.has("folders")) {
+                val folderArray = root.getJSONArray("folders")
+                for (i in 0 until folderArray.length()) {
+                    val fObj = folderArray.getJSONObject(i)
+                    val remotePath = fObj.optString("remotePath", "")
+                    val isSelected = fObj.optBoolean("isSelected", true)
+                    if (remotePath.isNotEmpty()) {
+                        repository.updateFolderSelection(remotePath, isSelected)
+                    }
+                }
+            }
+
             refreshLocalFiles()
-            _statusMessage.value = "Conflict resolved successfully"
+            checkConnection()
+            _statusMessage.value = "Settings imported successfully"
+            Result.success("Settings imported successfully")
+        } catch (e: Exception) {
+            _statusMessage.value = "Failed to import settings: ${e.message}"
+            Result.failure(e)
         }
     }
 

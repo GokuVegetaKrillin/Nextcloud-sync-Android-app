@@ -99,6 +99,14 @@ class SyncEngine(
         }
 
         val settings = settingsDao.getSettings() ?: SyncSettingsEntity()
+        if (!settings.isSyncEnabled) {
+            _syncState.value = _syncState.value.copy(
+                status = SyncStatus.PAUSED,
+                currentAction = "Synchronization is disabled in settings",
+                currentFile = ""
+            )
+            return@withContext
+        }
 
         _syncState.value = SyncProgressState(
             status = SyncStatus.SYNCING,
@@ -110,6 +118,7 @@ class SyncEngine(
         val startTime = System.currentTimeMillis()
         var totalFilesProcessed = 0
         var bytesTransferred = 0L
+        val stallTimeout = settings.transferStallTimeoutSeconds.toLong().coerceAtLeast(30L)
 
         try {
             // 1. Connection check
@@ -159,6 +168,7 @@ class SyncEngine(
             // Add root-level files
             for (item in rootRemoteItems) {
                 if (!item.isDirectory && item.path.isNotEmpty() && item.path != "/") {
+                    if (settings.ignoreDotFilesAndFolders && item.displayName.startsWith(".")) continue
                     allRemoteItemsMap[item.path] = item
                 }
             }
@@ -182,15 +192,19 @@ class SyncEngine(
 
                 for (item in remoteItems) {
                     if (item.path.isNotEmpty() && item.path != "/") {
+                        if (settings.ignoreDotFilesAndFolders) {
+                            val hasDotSegment = item.path.split("/").any { it.startsWith(".") && it.isNotEmpty() }
+                            if (hasDotSegment) continue
+                        }
                         allRemoteItemsMap[item.path] = item
                     }
                 }
             }
 
-            // 5. Scan local filesystem
+            // 5. Scan local filesystem (including newly created local subdirectories)
             _syncState.value = _syncState.value.copy(currentAction = "Scanning local storage...")
             val localBaseDir = repository.localSyncRootDir
-            val localFilesMap = scanLocalDirectory(localBaseDir, enabledFolders)
+            val localFilesMap = scanLocalDirectory(localBaseDir, enabledFolders, settings.ignoreDotFilesAndFolders)
 
             // 6. Fetch previous journal
             val journalMap = journalDao.getAllJournalEntries().associateBy { it.remotePath }
@@ -203,11 +217,11 @@ class SyncEngine(
             allPaths.addAll(localFilesMap.keys)
             allPaths.addAll(journalMap.keys)
 
-            // Filter paths belonging to enabled folders or root level files
+            // Filter paths belonging to enabled folders, new local folders, or root level files
             val targetPaths = allPaths.filter { path ->
-                // Root-level files (no slash or only leading slash)
                 val isRootFile = !path.removePrefix("/").contains("/")
-                isRootFile || enabledFolders.any { folder ->
+                val isLocalOnlyDir = localFilesMap[path]?.isDirectory == true
+                isRootFile || isLocalOnlyDir || enabledFolders.any { folder ->
                     path == folder.remotePath || path.startsWith("${folder.remotePath}/")
                 }
             }.sortedWith(compareBy({ !it.contains("/") }, { it.count { c -> c == '/' } }, { it }))
@@ -242,154 +256,11 @@ class SyncEngine(
                     filesSyncedCount = totalFilesProcessed
                 )
 
-                if (remote != null && local != null) {
-                    // Item exists both locally and remotely
-                    if (remote.isDirectory) {
-                        // Directory exists on both sides
-                        targetLocalFile.mkdirs()
-                        journalDao.insertOrUpdate(
-                            SyncJournalEntryEntity(
-                                remotePath = path,
-                                localRelativePath = relativeLocalPath,
-                                isDirectory = true,
-                                remoteEtag = remote.etag,
-                                remoteSize = 0L,
-                                remoteMtime = remote.lastModified,
-                                localSize = 0L,
-                                localMtime = targetLocalFile.lastModified(),
-                                fileId = remote.fileId ?: ""
-                            )
-                        )
-                    } else {
-                        // File exists on both sides
-                        val localModified = journal != null && (local.length() != journal.localSize || Math.abs(local.lastModified() - journal.localMtime) > 2000)
-                        val remoteModified = journal != null && (remote.etag != journal.remoteEtag)
-
-                        if (journal == null) {
-                            // File exists on both sides but never synced before
-                            if (local.length() == remote.size && Math.abs(local.lastModified() - remote.lastModified) < 3000) {
-                                // Match: adopt
-                                journalDao.insertOrUpdate(
-                                    SyncJournalEntryEntity(
-                                        remotePath = path,
-                                        localRelativePath = relativeLocalPath,
-                                        isDirectory = false,
-                                        remoteEtag = remote.etag,
-                                        remoteSize = remote.size,
-                                        remoteMtime = remote.lastModified,
-                                        localSize = local.length(),
-                                        localMtime = local.lastModified(),
-                                        fileId = remote.fileId ?: ""
-                                    )
-                                )
-                            } else {
-                                // Conflict or download remote
-                                handleConflictOrResolution(
-                                    path = path,
-                                    relativeLocalPath = relativeLocalPath,
-                                    localFile = local,
-                                    remote = remote,
-                                    account = account,
-                                    settings = settings
-                                )
-                            }
-                        } else if (localModified && remoteModified) {
-                            // CONFLICT! Both sides changed
-                            handleConflictOrResolution(
-                                path = path,
-                                relativeLocalPath = relativeLocalPath,
-                                localFile = local,
-                                remote = remote,
-                                account = account,
-                                settings = settings
-                            )
-                        } else if (localModified) {
-                            // Upload local modification
-                            _syncState.value = _syncState.value.copy(currentAction = "Uploading ${targetLocalFile.name}")
-                            val etag = if (account.isSimulatedDemo) {
-                                repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull() ?: "etag_${System.currentTimeMillis()}"
-                            } else {
-                                repository.nextcloudClient.uploadFile(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    local,
-                                    local.lastModified(),
-                                    account.trustAllCerts
-                                ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
-                            }
-                            bytesTransferred += local.length()
-                            journalDao.insertOrUpdate(
-                                SyncJournalEntryEntity(
-                                    remotePath = path,
-                                    localRelativePath = relativeLocalPath,
-                                    isDirectory = false,
-                                    remoteEtag = etag,
-                                    remoteSize = local.length(),
-                                    remoteMtime = local.lastModified(),
-                                    localSize = local.length(),
-                                    localMtime = local.lastModified(),
-                                    fileId = remote.fileId ?: ""
-                                )
-                            )
-                            repository.logActivity(ActivityType.UPLOAD, path, "Uploaded updated local file to Nextcloud", local.length())
-                        } else if (remoteModified) {
-                            // Download remote modification
-                            _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
-                            val etag = if (account.isSimulatedDemo) {
-                                repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
-                            } else {
-                                repository.nextcloudClient.downloadFile(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    targetLocalFile,
-                                    account.trustAllCerts
-                                ).getOrNull() ?: remote.etag
-                            }
-                            if (remote.lastModified > 0L) {
-                                FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
-                            }
-                            bytesTransferred += targetLocalFile.length()
-                            journalDao.insertOrUpdate(
-                                SyncJournalEntryEntity(
-                                    remotePath = path,
-                                    localRelativePath = relativeLocalPath,
-                                    isDirectory = false,
-                                    remoteEtag = etag,
-                                    remoteSize = targetLocalFile.length(),
-                                    remoteMtime = remote.lastModified,
-                                    localSize = targetLocalFile.length(),
-                                    localMtime = targetLocalFile.lastModified(),
-                                    fileId = remote.fileId ?: ""
-                                )
-                            )
-                            repository.logActivity(ActivityType.DOWNLOAD, path, "Downloaded updated file from Nextcloud", targetLocalFile.length())
-                        }
-                    }
-                } else if (remote != null && local == null) {
-                    // Item exists in remote, not in local
-                    if (journal != null) {
-                        // Was in journal -> Local file was deleted!
-                        _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
-                        if (account.isSimulatedDemo) {
-                            repository.mockServer.deleteItem(path)
-                        } else {
-                            repository.nextcloudClient.deleteItem(
-                                account.serverUrl,
-                                account.username,
-                                account.passwordOrToken,
-                                path,
-                                account.trustAllCerts
-                            )
-                        }
-                        journalDao.deleteByRemotePath(path)
-                        repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
-                    } else {
-                        // New remote item -> Download to local!
+                try {
+                    if (remote != null && local != null) {
+                        // Item exists both locally and remotely
                         if (remote.isDirectory) {
+                            // Directory exists on both sides
                             targetLocalFile.mkdirs()
                             journalDao.insertOrUpdate(
                                 SyncJournalEntryEntity(
@@ -404,108 +275,335 @@ class SyncEngine(
                                     fileId = remote.fileId ?: ""
                                 )
                             )
-                            repository.logActivity(ActivityType.CREATE_DIR_LOCAL, path, "Created local folder for '${remote.displayName}'")
                         } else {
-                            _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
-                            val etag = if (account.isSimulatedDemo) {
-                                repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
-                            } else {
-                                repository.nextcloudClient.downloadFile(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    targetLocalFile,
-                                    account.trustAllCerts
-                                ).getOrNull() ?: remote.etag
-                            }
-                            if (remote.lastModified > 0L) {
-                                FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
-                            }
-                            bytesTransferred += targetLocalFile.length()
-                            journalDao.insertOrUpdate(
-                                SyncJournalEntryEntity(
-                                    remotePath = path,
-                                    localRelativePath = relativeLocalPath,
-                                    isDirectory = false,
-                                    remoteEtag = etag,
-                                    remoteSize = targetLocalFile.length(),
-                                    remoteMtime = remote.lastModified,
-                                    localSize = targetLocalFile.length(),
-                                    localMtime = targetLocalFile.lastModified(),
-                                    fileId = remote.fileId ?: ""
+                            // File exists on both sides
+                            val localModified = journal != null && (local.length() != journal.localSize || Math.abs(local.lastModified() - journal.localMtime) > 2000)
+                            val remoteModified = journal != null && (remote.etag != journal.remoteEtag)
+
+                            if (journal == null) {
+                                // File exists on both sides but never synced before
+                                if (local.length() == remote.size && Math.abs(local.lastModified() - remote.lastModified) < 3000) {
+                                    // Match: adopt
+                                    journalDao.insertOrUpdate(
+                                        SyncJournalEntryEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isDirectory = false,
+                                            remoteEtag = remote.etag,
+                                            remoteSize = remote.size,
+                                            remoteMtime = remote.lastModified,
+                                            localSize = local.length(),
+                                            localMtime = local.lastModified(),
+                                            fileId = remote.fileId ?: ""
+                                        )
+                                    )
+                                } else {
+                                    // Conflict or download remote
+                                    handleConflictOrResolution(
+                                        path = path,
+                                        relativeLocalPath = relativeLocalPath,
+                                        localFile = local,
+                                        remote = remote,
+                                        account = account,
+                                        settings = settings
+                                    )
+                                }
+                            } else if (localModified && remoteModified) {
+                                // CONFLICT! Both sides changed
+                                handleConflictOrResolution(
+                                    path = path,
+                                    relativeLocalPath = relativeLocalPath,
+                                    localFile = local,
+                                    remote = remote,
+                                    account = account,
+                                    settings = settings
                                 )
-                            )
-                            repository.logActivity(ActivityType.DOWNLOAD, path, "Downloaded new file from Nextcloud", targetLocalFile.length())
+                            } else if (localModified) {
+                                // Upload local modification
+                                _syncState.value = _syncState.value.copy(currentAction = "Uploading ${targetLocalFile.name}")
+                                val etag = if (account.isSimulatedDemo) {
+                                    repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                } else {
+                                    repository.nextcloudClient.uploadFile(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        local,
+                                        local.lastModified(),
+                                        account.trustAllCerts,
+                                        stallTimeout
+                                    ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                }
+                                bytesTransferred += local.length()
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = false,
+                                        remoteEtag = etag,
+                                        remoteSize = local.length(),
+                                        remoteMtime = local.lastModified(),
+                                        localSize = local.length(),
+                                        localMtime = local.lastModified(),
+                                        fileId = remote.fileId ?: ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.UPLOAD, path, "Uploaded updated local file to Nextcloud", local.length())
+                            } else if (remoteModified) {
+                                // Download remote modification
+                                _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
+                                val etag = if (account.isSimulatedDemo) {
+                                    repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
+                                } else {
+                                    repository.nextcloudClient.downloadFile(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        targetLocalFile,
+                                        account.trustAllCerts,
+                                        stallTimeout
+                                    ).getOrNull() ?: remote.etag
+                                }
+                                if (remote.lastModified > 0L) {
+                                    FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
+                                }
+                                bytesTransferred += targetLocalFile.length()
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = false,
+                                        remoteEtag = etag,
+                                        remoteSize = targetLocalFile.length(),
+                                        remoteMtime = remote.lastModified,
+                                        localSize = targetLocalFile.length(),
+                                        localMtime = targetLocalFile.lastModified(),
+                                        fileId = remote.fileId ?: ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.DOWNLOAD, path, "Downloaded updated file from Nextcloud", targetLocalFile.length())
+                            }
+                        }
+                    } else if (remote != null && local == null) {
+                        // Item exists in remote, not in local
+                        if (journal != null) {
+                            // Deletion propagation with safeguards
+                            val parentDir = targetLocalFile.parentFile
+                            val isParentValid = parentDir != null && parentDir.exists()
+                            
+                            if (isParentValid && remote.etag == journal.remoteEtag) {
+                                // Local deletion confirmed and remote was not modified in the meantime
+                                _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
+                                if (account.isSimulatedDemo) {
+                                    repository.mockServer.deleteItem(path)
+                                } else {
+                                    repository.nextcloudClient.deleteItem(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        account.trustAllCerts
+                                    )
+                                }
+                                journalDao.deleteByRemotePath(path)
+                                repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
+                            } else {
+                                // Safeguard: Parent directory was missing/unmounted or remote changed on server! Re-download server file to protect against data loss.
+                                if (remote.isDirectory) {
+                                    targetLocalFile.mkdirs()
+                                    journalDao.insertOrUpdate(
+                                        SyncJournalEntryEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isDirectory = true,
+                                            remoteEtag = remote.etag,
+                                            remoteSize = 0L,
+                                            remoteMtime = remote.lastModified,
+                                            localSize = 0L,
+                                            localMtime = targetLocalFile.lastModified(),
+                                            fileId = remote.fileId ?: ""
+                                        )
+                                    )
+                                } else {
+                                    val etag = if (account.isSimulatedDemo) {
+                                        repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
+                                    } else {
+                                        repository.nextcloudClient.downloadFile(
+                                            account.serverUrl,
+                                            account.username,
+                                            account.passwordOrToken,
+                                            path,
+                                            targetLocalFile,
+                                            account.trustAllCerts,
+                                            stallTimeout
+                                        ).getOrNull() ?: remote.etag
+                                    }
+                                    if (remote.lastModified > 0L) {
+                                        FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
+                                    }
+                                    bytesTransferred += targetLocalFile.length()
+                                    journalDao.insertOrUpdate(
+                                        SyncJournalEntryEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isDirectory = false,
+                                            remoteEtag = etag,
+                                            remoteSize = targetLocalFile.length(),
+                                            remoteMtime = remote.lastModified,
+                                            localSize = targetLocalFile.length(),
+                                            localMtime = targetLocalFile.lastModified(),
+                                            fileId = remote.fileId ?: ""
+                                        )
+                                    )
+                                    repository.logActivity(ActivityType.DOWNLOAD, path, "Safeguard: Preserved Nextcloud file '${targetLocalFile.name}'", targetLocalFile.length())
+                                }
+                            }
+                        } else {
+                            // New remote item -> Download to local!
+                            if (remote.isDirectory) {
+                                targetLocalFile.mkdirs()
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = true,
+                                        remoteEtag = remote.etag,
+                                        remoteSize = 0L,
+                                        remoteMtime = remote.lastModified,
+                                        localSize = 0L,
+                                        localMtime = targetLocalFile.lastModified(),
+                                        fileId = remote.fileId ?: ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.CREATE_DIR_LOCAL, path, "Created local folder for '${remote.displayName}'")
+                            } else {
+                                _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
+                                val etag = if (account.isSimulatedDemo) {
+                                    repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
+                                } else {
+                                    repository.nextcloudClient.downloadFile(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        targetLocalFile,
+                                        account.trustAllCerts,
+                                        stallTimeout
+                                    ).getOrNull() ?: remote.etag
+                                }
+                                if (remote.lastModified > 0L) {
+                                    FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
+                                }
+                                bytesTransferred += targetLocalFile.length()
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = false,
+                                        remoteEtag = etag,
+                                        remoteSize = targetLocalFile.length(),
+                                        remoteMtime = remote.lastModified,
+                                        localSize = targetLocalFile.length(),
+                                        localMtime = targetLocalFile.lastModified(),
+                                        fileId = remote.fileId ?: ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.DOWNLOAD, path, "Downloaded new file from Nextcloud", targetLocalFile.length())
+                            }
+                        }
+                    } else if (remote == null && local != null) {
+                        // Item exists in local, not in remote
+                        if (journal != null) {
+                            // Was in journal -> Remote was deleted on server!
+                            targetLocalFile.deleteRecursively()
+                            journalDao.deleteByRemotePath(path)
+                            repository.logActivity(ActivityType.DELETE_LOCAL, path, "Deleted local file (deleted on Nextcloud server)")
+                        } else {
+                            // New local item -> Upload to Nextcloud!
+                            if (local.isDirectory) {
+                                if (account.isSimulatedDemo) {
+                                    repository.mockServer.createDirectory(path)
+                                } else {
+                                    repository.nextcloudClient.createDirectory(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        account.trustAllCerts
+                                    )
+                                }
+                                // Auto-register new local folder in sync folder config so it syncs automatically
+                                val existingFolder = folderDao.getFolder(path)
+                                if (existingFolder == null) {
+                                    folderDao.insertOrUpdateFolder(
+                                        SyncFolderConfigEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isSelected = true,
+                                            displayName = local.name,
+                                            isExplicitlyConfigured = true,
+                                            remoteSize = 0L,
+                                            lastSyncTime = System.currentTimeMillis()
+                                        )
+                                    )
+                                }
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = true,
+                                        remoteEtag = "dir_etag_${System.currentTimeMillis()}",
+                                        remoteSize = 0L,
+                                        remoteMtime = local.lastModified(),
+                                        localSize = 0L,
+                                        localMtime = local.lastModified(),
+                                        fileId = ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.CREATE_DIR_REMOTE, path, "Created directory on Nextcloud and enabled auto-sync for '$path'")
+                            } else {
+                                _syncState.value = _syncState.value.copy(currentAction = "Uploading ${local.name}")
+                                val etag = if (account.isSimulatedDemo) {
+                                    repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                } else {
+                                    repository.nextcloudClient.uploadFile(
+                                        account.serverUrl,
+                                        account.username,
+                                        account.passwordOrToken,
+                                        path,
+                                        local,
+                                        local.lastModified(),
+                                        account.trustAllCerts,
+                                        stallTimeout
+                                    ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                }
+                                bytesTransferred += local.length()
+                                journalDao.insertOrUpdate(
+                                    SyncJournalEntryEntity(
+                                        remotePath = path,
+                                        localRelativePath = relativeLocalPath,
+                                        isDirectory = false,
+                                        remoteEtag = etag,
+                                        remoteSize = local.length(),
+                                        remoteMtime = local.lastModified(),
+                                        localSize = local.length(),
+                                        localMtime = local.lastModified(),
+                                        fileId = ""
+                                    )
+                                )
+                                repository.logActivity(ActivityType.UPLOAD, path, "Uploaded new local file to Nextcloud", local.length())
+                            }
                         }
                     }
-                } else if (remote == null && local != null) {
-                    // Item exists in local, not in remote
-                    if (journal != null) {
-                        // Was in journal -> Remote was deleted on server!
-                        targetLocalFile.deleteRecursively()
-                        journalDao.deleteByRemotePath(path)
-                        repository.logActivity(ActivityType.DELETE_LOCAL, path, "Deleted local file (deleted on Nextcloud server)")
-                    } else {
-                        // New local item -> Upload to Nextcloud!
-                        if (local.isDirectory) {
-                            if (account.isSimulatedDemo) {
-                                repository.mockServer.createDirectory(path)
-                            } else {
-                                repository.nextcloudClient.createDirectory(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    account.trustAllCerts
-                                )
-                            }
-                            journalDao.insertOrUpdate(
-                                SyncJournalEntryEntity(
-                                    remotePath = path,
-                                    localRelativePath = relativeLocalPath,
-                                    isDirectory = true,
-                                    remoteEtag = "dir_etag_${System.currentTimeMillis()}",
-                                    remoteSize = 0L,
-                                    remoteMtime = local.lastModified(),
-                                    localSize = 0L,
-                                    localMtime = local.lastModified(),
-                                    fileId = ""
-                                )
-                            )
-                            repository.logActivity(ActivityType.CREATE_DIR_REMOTE, path, "Created directory on Nextcloud")
-                        } else {
-                            _syncState.value = _syncState.value.copy(currentAction = "Uploading ${local.name}")
-                            val etag = if (account.isSimulatedDemo) {
-                                repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull() ?: "etag_${System.currentTimeMillis()}"
-                            } else {
-                                repository.nextcloudClient.uploadFile(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    local,
-                                    local.lastModified(),
-                                    account.trustAllCerts
-                                ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
-                            }
-                            bytesTransferred += local.length()
-                            journalDao.insertOrUpdate(
-                                SyncJournalEntryEntity(
-                                    remotePath = path,
-                                    localRelativePath = relativeLocalPath,
-                                    isDirectory = false,
-                                    remoteEtag = etag,
-                                    remoteSize = local.length(),
-                                    remoteMtime = local.lastModified(),
-                                    localSize = local.length(),
-                                    localMtime = local.lastModified(),
-                                    fileId = ""
-                                )
-                            )
-                            repository.logActivity(ActivityType.UPLOAD, path, "Uploaded new local file to Nextcloud", local.length())
-                        }
-                    }
+                } catch (transferEx: Exception) {
+                    repository.logActivity(
+                        type = ActivityType.ERROR,
+                        path = path,
+                        message = "Transfer skipped for '$path': ${transferEx.localizedMessage ?: "timeout/network stall"}. Will retry next cycle.",
+                        isSuccess = false
+                    )
                 }
 
                 totalFilesProcessed++
@@ -734,34 +832,42 @@ class SyncEngine(
         }
     }
 
-    private fun scanLocalDirectory(baseDir: File, enabledFolders: List<SyncFolderConfigEntity>): Map<String, File> {
-        val map = mutableMapOf<String, File>()
-        // Scan root level files
-        if (baseDir.exists()) {
-            val rootFiles = baseDir.listFiles() ?: emptyArray()
-            for (file in rootFiles) {
-                if (!file.isDirectory && !file.name.startsWith(".") && !file.name.contains("(conflicted copy")) {
-                    map["/${file.name}"] = file
-                }
-            }
+    private fun isTempOrIgnoredFile(file: File, ignoreDotFiles: Boolean): Boolean {
+        val name = file.name
+        if (name.startsWith(".ncsync_part") || name.contains(".tmp_") || name.contains("(conflicted copy")) {
+            return true
         }
-        // Scan enabled folder trees
-        for (folder in enabledFolders) {
-            val folderDir = File(baseDir, folder.localRelativePath)
-            if (!folderDir.exists()) folderDir.mkdirs()
-            scanRecursive(folderDir, folder.remotePath, map)
+        if (ignoreDotFiles && name.startsWith(".")) {
+            return true
+        }
+        return false
+    }
+
+    private fun scanLocalDirectory(baseDir: File, enabledFolders: List<SyncFolderConfigEntity>, ignoreDotFiles: Boolean): Map<String, File> {
+        val map = mutableMapOf<String, File>()
+        if (!baseDir.exists()) return map
+
+        val rootFiles = baseDir.listFiles() ?: emptyArray()
+        for (file in rootFiles) {
+            if (isTempOrIgnoredFile(file, ignoreDotFiles)) continue
+            if (file.isDirectory) {
+                val remotePath = "/${file.name}"
+                scanRecursive(file, remotePath, map, ignoreDotFiles)
+            } else {
+                map["/${file.name}"] = file
+            }
         }
         return map
     }
 
-    private fun scanRecursive(dir: File, currentRemotePath: String, outMap: MutableMap<String, File>) {
+    private fun scanRecursive(dir: File, currentRemotePath: String, outMap: MutableMap<String, File>, ignoreDotFiles: Boolean) {
         outMap[currentRemotePath] = dir
         val children = dir.listFiles() ?: return
         for (child in children) {
-            if (child.name.startsWith(".") || child.name.contains("(conflicted copy")) continue
+            if (isTempOrIgnoredFile(child, ignoreDotFiles)) continue
             val childRemotePath = "$currentRemotePath/${child.name}"
             if (child.isDirectory) {
-                scanRecursive(child, childRemotePath, outMap)
+                scanRecursive(child, childRemotePath, outMap, ignoreDotFiles)
             } else {
                 outMap[childRemotePath] = child
             }

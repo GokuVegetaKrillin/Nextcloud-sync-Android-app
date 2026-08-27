@@ -10,8 +10,10 @@ import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.security.SecureRandom
@@ -20,6 +22,8 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+
+class TransferStalledException(message: String) : IOException(message)
 
 class NextcloudClient {
 
@@ -261,8 +265,13 @@ class NextcloudClient {
         remotePath: String,
         destFile: File,
         trustAll: Boolean = true,
+        stallTimeoutSeconds: Long = 300L,
         onProgress: ((bytesRead: Long, totalBytes: Long) -> Unit)? = null
     ): Result<String> = withContext(Dispatchers.IO) {
+        destFile.parentFile?.mkdirs()
+        // Hidden temporary download staging file to prevent scan collision and incomplete files
+        val tempFile = File(destFile.parentFile, ".${destFile.name}.ncsync_part_${System.currentTimeMillis()}")
+
         try {
             val davBase = getWebDavBaseUrl(serverUrl, username)
             val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
@@ -285,19 +294,25 @@ class NextcloudClient {
                 ?: response.header("OC-ETag")?.removeSurrounding("\"")
                 ?: ""
             val totalBytes = response.body?.contentLength() ?: -1L
-
-            destFile.parentFile?.mkdirs()
-            val tempFile = File(destFile.parentFile, "${destFile.name}.tmp_${System.currentTimeMillis()}")
+            val stallTimeoutMs = (stallTimeoutSeconds.coerceAtLeast(15L)) * 1000L
+            var lastProgressTime = System.currentTimeMillis()
 
             response.body?.byteStream()?.use { input ->
                 FileOutputStream(tempFile).use { output ->
-                    val buffer = ByteArray(32 * 1024)
+                    val buffer = ByteArray(64 * 1024)
                     var bytesRead: Int
                     var totalRead = 0L
                     while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
-                        onProgress?.invoke(totalRead, totalBytes)
+                        if (bytesRead > 0) {
+                            output.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            lastProgressTime = System.currentTimeMillis()
+                            onProgress?.invoke(totalRead, totalBytes)
+                        } else {
+                            if (System.currentTimeMillis() - lastProgressTime > stallTimeoutMs) {
+                                throw TransferStalledException("Download stalled on $remotePath with 0 bytes transferred for ${stallTimeoutSeconds}s")
+                            }
+                        }
                     }
                     output.flush()
                 }
@@ -305,11 +320,18 @@ class NextcloudClient {
 
             if (tempFile.exists()) {
                 if (destFile.exists()) destFile.delete()
-                tempFile.renameTo(destFile)
+                val renamed = tempFile.renameTo(destFile)
+                if (!renamed) {
+                    tempFile.copyTo(destFile, overwrite = true)
+                    tempFile.delete()
+                }
             }
 
             Result.success(etag)
         } catch (e: Exception) {
+            if (tempFile.exists()) {
+                try { tempFile.delete() } catch (_: Exception) {}
+            }
             Result.failure(e)
         }
     }
@@ -322,6 +344,7 @@ class NextcloudClient {
         sourceFile: File,
         mtimeMs: Long = sourceFile.lastModified(),
         trustAll: Boolean = true,
+        stallTimeoutSeconds: Long = 300L,
         onProgress: ((bytesWritten: Long, totalBytes: Long) -> Unit)? = null
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
@@ -334,7 +357,33 @@ class NextcloudClient {
             val fileLength = sourceFile.length()
             val mtimeSec = mtimeMs / 1000
 
-            val requestBody = sourceFile.asRequestBody(mediaType)
+            val requestBody = object : RequestBody() {
+                override fun contentType() = mediaType
+                override fun contentLength() = fileLength
+
+                override fun writeTo(sink: BufferedSink) {
+                    val stallTimeoutMs = (stallTimeoutSeconds.coerceAtLeast(15L)) * 1000L
+                    var lastProgressTime = System.currentTimeMillis()
+                    var totalWritten = 0L
+
+                    FileInputStream(sourceFile).use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            if (read > 0) {
+                                sink.write(buffer, 0, read)
+                                totalWritten += read
+                                lastProgressTime = System.currentTimeMillis()
+                                onProgress?.invoke(totalWritten, fileLength)
+                            } else {
+                                if (System.currentTimeMillis() - lastProgressTime > stallTimeoutMs) {
+                                    throw TransferStalledException("Upload stalled on $remotePath with 0 bytes transferred for ${stallTimeoutSeconds}s")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             val request = Request.Builder()
                 .url(targetUrl)

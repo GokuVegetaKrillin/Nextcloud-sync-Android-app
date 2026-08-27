@@ -31,6 +31,7 @@ fun ConflictsScreen(
     viewModel: MainViewModel
 ) {
     val conflicts by viewModel.conflicts.collectAsState()
+    val resolvingConflicts by viewModel.resolvingConflicts.collectAsState()
 
     Column(
         modifier = Modifier
@@ -85,8 +86,10 @@ fun ConflictsScreen(
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
                 items(conflicts, key = { it.remotePath }) { conflict ->
+                    val isResolving = resolvingConflicts.contains(conflict.remotePath)
                     ConflictCard(
                         conflict = conflict,
+                        isResolving = isResolving,
                         onResolve = { resolution ->
                             viewModel.resolveConflict(conflict.remotePath, resolution)
                         }
@@ -100,6 +103,7 @@ fun ConflictsScreen(
 @Composable
 private fun ConflictCard(
     conflict: ConflictEntity,
+    isResolving: Boolean,
     onResolve: (ConflictResolution) -> Unit
 ) {
     Card(
@@ -124,7 +128,7 @@ private fun ConflictCard(
                     modifier = Modifier.size(24.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = conflict.remotePath.substringAfterLast('/'),
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
@@ -135,6 +139,13 @@ private fun ConflictCard(
                         text = "Path: ${conflict.remotePath}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (isResolving) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp,
+                        color = NcPrimaryBlue
                     )
                 }
             }
@@ -185,40 +196,61 @@ private fun ConflictCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            Text(
-                text = "Choose resolution action:",
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                OutlinedButton(
-                    onClick = { onResolve(ConflictResolution.KEEP_LOCAL) },
+            if (isResolving) {
+                Surface(
                     shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1f).testTag("keep_local_btn")
+                    color = NcPrimaryBlue.copy(alpha = 0.1f),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Keep Local", style = MaterialTheme.typography.labelSmall)
+                    Row(
+                        modifier = Modifier.padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = NcPrimaryBlue)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Applying resolution & syncing timestamps...", style = MaterialTheme.typography.bodySmall, color = NcPrimaryBlue)
+                    }
                 }
+            } else {
+                Text(
+                    text = "Choose resolution action:",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
 
-                OutlinedButton(
-                    onClick = { onResolve(ConflictResolution.KEEP_REMOTE) },
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1f).testTag("keep_remote_btn")
-                ) {
-                    Text("Keep Server", style = MaterialTheme.typography.labelSmall)
-                }
+                Spacer(modifier = Modifier.height(8.dp))
 
-                Button(
-                    onClick = { onResolve(ConflictResolution.KEEP_BOTH) },
-                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier.weight(1f).testTag("keep_both_btn")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("Keep Both", style = MaterialTheme.typography.labelSmall)
+                    OutlinedButton(
+                        onClick = { onResolve(ConflictResolution.KEEP_LOCAL) },
+                        enabled = !isResolving,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("keep_local_btn")
+                    ) {
+                        Text("Keep Local", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    OutlinedButton(
+                        onClick = { onResolve(ConflictResolution.KEEP_REMOTE) },
+                        enabled = !isResolving,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("keep_remote_btn")
+                    ) {
+                        Text("Keep Server", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    Button(
+                        onClick = { onResolve(ConflictResolution.KEEP_BOTH) },
+                        enabled = !isResolving,
+                        colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f).testTag("keep_both_btn")
+                    ) {
+                        Text("Keep Both", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }

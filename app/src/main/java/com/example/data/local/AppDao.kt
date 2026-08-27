@@ -123,6 +123,15 @@ interface SyncSettingsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertOrUpdateSettings(settings: SyncSettingsEntity)
 
+    @Query("UPDATE sync_settings SET isSyncEnabled = :enabled WHERE id = 1")
+    suspend fun updateSyncEnabled(enabled: Boolean)
+
+    @Query("UPDATE sync_settings SET ignoreDotFilesAndFolders = :ignore WHERE id = 1")
+    suspend fun updateIgnoreDotFiles(ignore: Boolean)
+
+    @Query("UPDATE sync_settings SET transferStallTimeoutSeconds = :timeoutSeconds WHERE id = 1")
+    suspend fun updateStallTimeout(timeoutSeconds: Int)
+
     @Query("UPDATE sync_settings SET syncIntervalValue = :value, syncIntervalUnit = :unit WHERE id = 1")
     suspend fun updateInterval(value: Int, unit: SyncIntervalUnit)
 

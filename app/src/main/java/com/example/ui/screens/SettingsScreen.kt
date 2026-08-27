@@ -34,6 +34,7 @@ import com.example.ui.MainViewModel
 import com.example.ui.theme.*
 import com.example.util.BatteryOptimizationHelper
 import com.example.util.StoragePermissionHelper
+import kotlinx.coroutines.launch
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,12 +85,23 @@ fun SettingsScreen(
         mutableStateOf(settings?.syncIntervalUnit ?: SyncIntervalUnit.MINUTES)
     }
 
+    // Stall timeout input
+    var stallTimeoutInput by remember(settings?.transferStallTimeoutSeconds) {
+        mutableStateOf((settings?.transferStallTimeoutSeconds ?: 300).toString())
+    }
+
     // Local Folder Configuration Input
     var customPathInput by remember(settings?.customLocalSyncPath) {
         mutableStateOf(settings?.customLocalSyncPath ?: "")
     }
 
     var showPermissionRequestDialog by remember { mutableStateOf(false) }
+    var showExportDialog by remember { mutableStateOf(false) }
+    var showImportDialog by remember { mutableStateOf(false) }
+    var exportedJsonText by remember { mutableStateOf("") }
+    var importJsonInput by remember { mutableStateOf("") }
+    var importErrorMessage by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     // Effective active directory
     val effectivePath = remember(settings?.customLocalSyncPath) {
@@ -164,6 +176,75 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp)
     ) {
+        // Section 0: Master Synchronization Toggle
+        val isSyncEnabled = settings?.isSyncEnabled ?: true
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isSyncEnabled) NcPrimaryBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (isSyncEnabled) NcPrimaryBlue.copy(alpha = 0.4f) else MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                ),
+                modifier = Modifier.fillMaxWidth().testTag("master_sync_card")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(
+                            imageVector = if (isSyncEnabled) Icons.Filled.SyncLock else Icons.Filled.SyncDisabled,
+                            contentDescription = null,
+                            tint = if (isSyncEnabled) NcPrimaryBlue else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column {
+                            Text(
+                                text = if (isSyncEnabled) "Master Synchronization: ACTIVE" else "Master Synchronization: PAUSED",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSyncEnabled) NcPrimaryBlue else MaterialTheme.colorScheme.error
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (isSyncEnabled)
+                                    "File syncing is fully enabled and running on schedule."
+                                else
+                                    "Syncing is paused. No files will be transferred until re-enabled.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Switch(
+                        checked = isSyncEnabled,
+                        onCheckedChange = { viewModel.updateSyncEnabled(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = NcPrimaryBlue,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.error
+                        ),
+                        modifier = Modifier.testTag("master_sync_toggle")
+                    )
+                }
+            }
+        }
+
         // Section 1: Background Persistence & Battery Keep-Alive (Crucial for never getting killed)
         item {
             Card(
@@ -951,7 +1032,7 @@ fun SettingsScreen(
             }
         }
 
-        // Section 5: Sync Behavior (Sync New Folders By Default, Background Sync)
+        // Section 5: Sync Behavior & Preferences
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -970,6 +1051,31 @@ fun SettingsScreen(
                     )
 
                     Spacer(modifier = Modifier.height(12.dp))
+
+                    // Ignore Dot-Files & Folders
+                    val ignoreDotFiles = settings?.ignoreDotFilesAndFolders ?: true
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Ignore Hidden Dot-Files & Folders", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold))
+                            Text(
+                                "Skip files and folders starting with a dot (e.g. .thumbnails, .git, .cache)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = ignoreDotFiles,
+                            onCheckedChange = { viewModel.updateIgnoreDotFiles(it) },
+                            colors = SwitchDefaults.colors(checkedTrackColor = NcPrimaryBlue),
+                            modifier = Modifier.testTag("ignore_dot_files_switch")
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
                     // Sync New Folders By Default
                     val syncNew = settings?.syncNewFoldersByDefault ?: true
@@ -1018,11 +1124,154 @@ fun SettingsScreen(
                             modifier = Modifier.testTag("background_sync_switch")
                         )
                     }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                    // Transfer Stall Inactivity Timeout
+                    Column {
+                        Text(
+                            text = "Transfer Stall Inactivity Timeout",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                        )
+                        Text(
+                            text = "Abort and retry stalled file downloads if no progress bytes occur after this duration",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = stallTimeoutInput,
+                                onValueChange = {
+                                    if (it.isEmpty() || it.all { char -> char.isDigit() }) {
+                                        stallTimeoutInput = it
+                                    }
+                                },
+                                label = { Text("Timeout (Seconds)") },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                singleLine = true,
+                                modifier = Modifier.weight(1f).testTag("stall_timeout_input")
+                            )
+
+                            Button(
+                                onClick = {
+                                    val sec = stallTimeoutInput.toIntOrNull() ?: 300
+                                    viewModel.updateStallTimeout(sec)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.testTag("save_stall_timeout_btn")
+                            ) {
+                                Text("Save")
+                            }
+                        }
+
+                        val parsedStall = stallTimeoutInput.toIntOrNull() ?: 300
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Current: $parsedStall seconds (${parsedStall / 60}m ${parsedStall % 60}s)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NcPrimaryBlue
+                        )
+                    }
                 }
             }
         }
 
-        // Section 6: Maintenance & Journal Reset
+        // Section 6: Export & Import Configuration
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+                modifier = Modifier.fillMaxWidth().testTag("export_import_card")
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.ImportExport, contentDescription = null, tint = NcPrimaryBlue)
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "Export & Import Settings",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                text = "Backup, share, or restore complete app settings as JSON",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = NcWarningAmber.copy(alpha = 0.12f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Filled.Warning, contentDescription = null, tint = NcWarningAmber, modifier = Modifier.size(20.dp))
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Security Notice: Exported configuration includes your Nextcloud credentials and app tokens in plain text. Store exports securely.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch {
+                                    exportedJsonText = viewModel.exportSettingsJson()
+                                    showExportDialog = true
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("export_settings_btn")
+                        ) {
+                            Icon(Icons.Outlined.FileDownload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Export JSON")
+                        }
+
+                        Button(
+                            onClick = {
+                                importJsonInput = ""
+                                importErrorMessage = null
+                                showImportDialog = true
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f).testTag("import_settings_btn")
+                        ) {
+                            Icon(Icons.Outlined.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Import JSON")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 7: Diagnostics & Maintenance
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -1060,5 +1309,125 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+
+    // Export Settings Dialog
+    if (showExportDialog) {
+        AlertDialog(
+            onDismissRequest = { showExportDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.FileDownload, contentDescription = null, tint = NcPrimaryBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Exported Configuration", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = NcWarningAmber.copy(alpha = 0.12f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "⚠️ Plain-text Password Warning: This JSON configuration contains your server URL, username, and plain-text password/app token.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = exportedJsonText,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier.fillMaxWidth().height(220.dp).testTag("exported_json_field"),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(exportedJsonText))
+                        showExportDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                    modifier = Modifier.testTag("copy_exported_json_btn")
+                ) {
+                    Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Copy to Clipboard")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExportDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
+    // Import Settings Dialog
+    if (showImportDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.FileUpload, contentDescription = null, tint = NcPrimaryBlue)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Import Configuration", fontWeight = FontWeight.Bold)
+                }
+            },
+            text = {
+                Column {
+                    Text(
+                        "Paste a valid exported JSON configuration below to restore account, settings, and folder selections:",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = importJsonInput,
+                        onValueChange = {
+                            importJsonInput = it
+                            importErrorMessage = null
+                        },
+                        placeholder = { Text("{\n  \"version\": 2,\n  \"account\": { ... }\n}") },
+                        modifier = Modifier.fillMaxWidth().height(180.dp).testTag("import_json_input"),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                    importErrorMessage?.let { err ->
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        coroutineScope.launch {
+                            val result = viewModel.importSettingsJson(importJsonInput)
+                            if (result.isSuccess) {
+                                showImportDialog = false
+                            } else {
+                                importErrorMessage = result.exceptionOrNull()?.message ?: "Invalid JSON syntax or schema"
+                            }
+                        }
+                    },
+                    enabled = importJsonInput.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                    modifier = Modifier.testTag("apply_imported_json_btn")
+                ) {
+                    Text("Import & Apply")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 }

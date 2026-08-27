@@ -133,6 +133,14 @@ class NextcloudRepository(private val context: Context) {
         return settingsDao.getSettings() ?: SyncSettingsEntity()
     }
 
+    suspend fun getAllFolders(): List<SyncFolderConfigEntity> = withContext(Dispatchers.IO) {
+        folderDao.getAllFolders()
+    }
+
+    suspend fun saveFolder(folder: SyncFolderConfigEntity) = withContext(Dispatchers.IO) {
+        folderDao.insertOrUpdateFolder(folder)
+    }
+
     suspend fun saveAccount(account: AccountEntity) = withContext(Dispatchers.IO) {
         accountDao.insertOrUpdateAccount(account)
         logActivity(
@@ -249,6 +257,34 @@ class NextcloudRepository(private val context: Context) {
             type = ActivityType.INFO,
             path = remotePath,
             message = "Selective sync: Folder '$remotePath' is now ${if (isSelected) "Synchronized" else "Excluded"}"
+        )
+    }
+
+    suspend fun updateSyncEnabled(enabled: Boolean) = withContext(Dispatchers.IO) {
+        settingsDao.updateSyncEnabled(enabled)
+        logActivity(
+            type = ActivityType.INFO,
+            path = "/",
+            message = "Master synchronization toggle set to: ${if (enabled) "ENABLED" else "DISABLED"}"
+        )
+    }
+
+    suspend fun updateIgnoreDotFiles(ignore: Boolean) = withContext(Dispatchers.IO) {
+        settingsDao.updateIgnoreDotFiles(ignore)
+        logActivity(
+            type = ActivityType.INFO,
+            path = "/",
+            message = "Dot-files filtering set to: ${if (ignore) "Ignore dot files & folders (.thumbnails, .git, etc.)" else "Include dot files"}"
+        )
+    }
+
+    suspend fun updateStallTimeout(timeoutSeconds: Int) = withContext(Dispatchers.IO) {
+        val safeTimeout = timeoutSeconds.coerceAtLeast(30)
+        settingsDao.updateStallTimeout(safeTimeout)
+        logActivity(
+            type = ActivityType.INFO,
+            path = "/",
+            message = "Transfer stall timeout set to $safeTimeout seconds (${safeTimeout / 60} min)."
         )
     }
 

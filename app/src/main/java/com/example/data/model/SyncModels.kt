@@ -138,9 +138,12 @@ data class ConflictEntity(
 @Entity(tableName = "sync_settings")
 data class SyncSettingsEntity(
     @PrimaryKey val id: Int = 1,
+    val isSyncEnabled: Boolean = true, // Master toggle to enable/disable synchronization for entire account/app
     val syncIntervalValue: Int = 15,
     val syncIntervalUnit: SyncIntervalUnit = SyncIntervalUnit.MINUTES,
-    val syncNewFoldersByDefault: Boolean = true, // Key requirement: whether new folders added to Nextcloud sync automatically
+    val syncNewFoldersByDefault: Boolean = true, // Whether new folders added to Nextcloud sync automatically
+    val ignoreDotFilesAndFolders: Boolean = true, // Setting to ignore files and folders proceeded by a dot (e.g. .thumbnails)
+    val transferStallTimeoutSeconds: Int = 300, // No progress timeout (5 minutes = 300s) to skip stalled transfers
     val runInBackground: Boolean = true,
     val syncOnWifiOnly: Boolean = false,
     val syncOnChargingOnly: Boolean = false,

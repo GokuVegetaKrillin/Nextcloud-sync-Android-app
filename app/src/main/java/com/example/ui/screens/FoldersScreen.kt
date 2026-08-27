@@ -26,6 +26,55 @@ import com.example.ui.MainViewModel
 import com.example.ui.components.FormatUtils
 import com.example.ui.theme.*
 
+enum class FolderViewMode {
+    TREE,
+    FLAT_LIST
+}
+
+data class FolderTreeNode(
+    val path: String,
+    val displayName: String,
+    val folder: SyncFolderConfigEntity,
+    val depth: Int,
+    val children: MutableList<FolderTreeNode> = mutableListOf()
+)
+
+private fun buildFolderTree(folders: List<SyncFolderConfigEntity>): List<FolderTreeNode> {
+    if (folders.isEmpty()) return emptyList()
+
+    val sorted = folders.sortedBy { it.remotePath.lowercase() }
+    val nodeMap = mutableMapOf<String, FolderTreeNode>()
+    val rootNodes = mutableListOf<FolderTreeNode>()
+
+    for (folder in sorted) {
+        val cleanPath = "/" + folder.remotePath.trim('/')
+        val depth = cleanPath.split('/').filter { it.isNotEmpty() }.size - 1
+        val node = FolderTreeNode(
+            path = folder.remotePath,
+            displayName = folder.displayName,
+            folder = folder,
+            depth = depth.coerceAtLeast(0)
+        )
+        nodeMap[cleanPath] = node
+    }
+
+    for (folder in sorted) {
+        val cleanPath = "/" + folder.remotePath.trim('/')
+        val node = nodeMap[cleanPath] ?: continue
+        val parentPath = cleanPath.substringBeforeLast('/', "")
+        val effectiveParent = if (parentPath.isEmpty()) "" else parentPath
+
+        val parentNode = nodeMap[effectiveParent]
+        if (parentNode != null && parentNode != node) {
+            parentNode.children.add(node)
+        } else {
+            rootNodes.add(node)
+        }
+    }
+
+    return rootNodes
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FoldersScreen(
@@ -35,7 +84,13 @@ fun FoldersScreen(
     val settings by viewModel.settings.collectAsState()
     val syncNewByDefault = settings?.syncNewFoldersByDefault ?: true
 
+    var viewMode by remember { mutableStateOf(FolderViewMode.TREE) }
+    val collapsedPaths = remember { mutableStateMapOf<String, Boolean>() }
     var showAddFolderDialog by remember { mutableStateOf(false) }
+
+    val treeNodes = remember(folders) {
+        buildFolderTree(folders)
+    }
 
     Scaffold(
         floatingActionButton = {
@@ -128,67 +183,101 @@ fun FoldersScreen(
                 }
             }
 
-            // 2. Header & Batch Actions
+            // 2. Header, View Mode Switcher (Tree vs Flat) & Batch Actions
             item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Text(
-                            text = "Selective Folder Sync",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                        )
-                        Text(
-                            text = "Select folders to sync to this mobile device",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(
-                            onClick = { viewModel.refreshRemoteFolders() },
-                            modifier = Modifier.testTag("refresh_folders_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Refresh,
-                                contentDescription = "Scan server folders",
-                                tint = NcPrimaryBlue
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "Selective Folder Sync",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
+                            )
+                            Text(
+                                text = "Select folders to sync to this mobile device",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
 
-                        TextButton(
-                            onClick = {
-                                folders.forEach { folder ->
-                                    if (!folder.isSelected) {
-                                        viewModel.toggleFolderSelection(folder.remotePath, true)
-                                    }
-                                }
-                            },
-                            modifier = Modifier.testTag("select_all_folders_btn")
-                        ) {
-                            Text("All", fontWeight = FontWeight.SemiBold)
-                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = { viewModel.refreshRemoteFolders() },
+                                modifier = Modifier.testTag("refresh_folders_btn")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Refresh,
+                                    contentDescription = "Scan server folders",
+                                    tint = NcPrimaryBlue
+                                )
+                            }
 
-                        TextButton(
-                            onClick = {
-                                folders.forEach { folder ->
-                                    if (folder.isSelected) {
-                                        viewModel.toggleFolderSelection(folder.remotePath, false)
+                            TextButton(
+                                onClick = {
+                                    folders.forEach { folder ->
+                                        if (!folder.isSelected) {
+                                            viewModel.toggleFolderSelection(folder.remotePath, true)
+                                        }
                                     }
-                                }
-                            },
-                            modifier = Modifier.testTag("deselect_all_folders_btn")
-                        ) {
-                            Text("None", fontWeight = FontWeight.SemiBold)
+                                },
+                                modifier = Modifier.testTag("select_all_folders_btn")
+                            ) {
+                                Text("All", fontWeight = FontWeight.SemiBold)
+                            }
+
+                            TextButton(
+                                onClick = {
+                                    folders.forEach { folder ->
+                                        if (folder.isSelected) {
+                                            viewModel.toggleFolderSelection(folder.remotePath, false)
+                                        }
+                                    }
+                                },
+                                modifier = Modifier.testTag("deselect_all_folders_btn")
+                            ) {
+                                Text("None", fontWeight = FontWeight.SemiBold)
+                            }
                         }
+                    }
+
+                    // View Mode Switcher Tabs
+                    SingleChoiceSegmentedButtonRow(
+                        modifier = Modifier.fillMaxWidth().testTag("folder_view_mode_selector")
+                    ) {
+                        SegmentedButton(
+                            selected = viewMode == FolderViewMode.TREE,
+                            onClick = { viewMode = FolderViewMode.TREE },
+                            shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                            icon = {
+                                Icon(
+                                    Icons.Filled.AccountTree,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = { Text("Tree View", fontWeight = FontWeight.Medium) }
+                        )
+                        SegmentedButton(
+                            selected = viewMode == FolderViewMode.FLAT_LIST,
+                            onClick = { viewMode = FolderViewMode.FLAT_LIST },
+                            shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                            icon = {
+                                Icon(
+                                    Icons.Filled.ViewList,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            label = { Text("Flat List", fontWeight = FontWeight.Medium) }
+                        )
                     }
                 }
             }
 
-            // 3. Folders List
+            // 3. Folders List / Tree
             if (folders.isEmpty()) {
                 item {
                     Card(
@@ -223,12 +312,45 @@ fun FoldersScreen(
                         }
                     }
                 }
-            } else {
+            } else if (viewMode == FolderViewMode.FLAT_LIST) {
                 items(folders, key = { it.remotePath }) { folder ->
                     FolderSyncItemCard(
                         folder = folder,
                         onToggleSelection = { isSelected ->
                             viewModel.toggleFolderSelection(folder.remotePath, isSelected)
+                        }
+                    )
+                }
+            } else {
+                // TREE VIEW
+                fun addTreeItems(
+                    nodes: List<FolderTreeNode>,
+                    targetList: MutableList<Pair<FolderTreeNode, Int>>
+                ) {
+                    for (node in nodes) {
+                        targetList.add(node to node.depth)
+                        val isCollapsed = collapsedPaths[node.path] ?: false
+                        if (!isCollapsed && node.children.isNotEmpty()) {
+                            addTreeItems(node.children, targetList)
+                        }
+                    }
+                }
+
+                val flattenedTree = mutableListOf<Pair<FolderTreeNode, Int>>()
+                addTreeItems(treeNodes, flattenedTree)
+
+                items(flattenedTree, key = { it.first.path }) { (node, depth) ->
+                    val isCollapsed = collapsedPaths[node.path] ?: false
+                    FolderTreeNodeCard(
+                        node = node,
+                        depth = depth,
+                        isCollapsed = isCollapsed,
+                        hasChildren = node.children.isNotEmpty(),
+                        onToggleCollapse = {
+                            collapsedPaths[node.path] = !isCollapsed
+                        },
+                        onToggleSelection = { isSelected ->
+                            viewModel.toggleFolderSelection(node.folder.remotePath, isSelected)
                         }
                     )
                 }
@@ -279,6 +401,108 @@ fun FoldersScreen(
                 showAddFolderDialog = false
             }
         )
+    }
+}
+
+@Composable
+private fun FolderTreeNodeCard(
+    node: FolderTreeNode,
+    depth: Int,
+    isCollapsed: Boolean,
+    hasChildren: Boolean,
+    onToggleCollapse: () -> Unit,
+    onToggleSelection: (Boolean) -> Unit
+) {
+    val folder = node.folder
+    val indentPadding = (depth * 20).dp
+
+    Card(
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (folder.isSelected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (folder.isSelected) 1.dp else 0.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = indentPadding)
+            .clickable { onToggleSelection(!folder.isSelected) }
+            .testTag("folder_tree_node_${folder.displayName}")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                // Expand / Collapse Chevron if has children
+                if (hasChildren) {
+                    IconButton(
+                        onClick = onToggleCollapse,
+                        modifier = Modifier.size(32.dp).testTag("collapse_btn_${folder.displayName}")
+                    ) {
+                        Icon(
+                            imageVector = if (isCollapsed) Icons.Filled.ChevronRight else Icons.Filled.ExpandMore,
+                            contentDescription = if (isCollapsed) "Expand" else "Collapse",
+                            tint = NcPrimaryBlue,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.width(32.dp))
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (folder.isSelected) NcPrimaryBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (folder.isSelected) Icons.Filled.Folder else Icons.Outlined.FolderOff,
+                        contentDescription = folder.displayName,
+                        tint = if (folder.isSelected) NcPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(10.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = node.displayName,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = if (folder.isSelected) FontWeight.Bold else FontWeight.Normal
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = folder.remotePath,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Checkbox(
+                checked = folder.isSelected,
+                onCheckedChange = { onToggleSelection(it) },
+                colors = CheckboxDefaults.colors(
+                    checkedColor = NcPrimaryBlue
+                ),
+                modifier = Modifier.testTag("checkbox_${folder.displayName}")
+            )
+        }
     }
 }
 
