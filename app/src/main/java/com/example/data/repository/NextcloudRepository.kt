@@ -185,10 +185,14 @@ class NextcloudRepository(private val context: Context) {
         val account = accountDao.getAccount() ?: return@withContext Result.failure(Exception("No account configured"))
         val settings = settingsDao.getSettings() ?: SyncSettingsEntity()
 
-        val rootRemoteItems = if (account.isSimulatedDemo) {
-            mockServer.listFolder("/", depth = 1)
+        val discoveredFolders = mutableListOf<WebDavItem>()
+
+        if (account.isSimulatedDemo) {
+            val allItems = mockServer.listFolder("/", depth = 10)
+            discoveredFolders.addAll(allItems.filter { it.isDirectory && it.path != "/" && it.path.isNotEmpty() })
         } else {
-            val res = nextcloudClient.listFolder(
+            // First list root
+            val rootRes = nextcloudClient.listFolder(
                 account.serverUrl,
                 account.username,
                 account.passwordOrToken,
@@ -196,16 +200,45 @@ class NextcloudRepository(private val context: Context) {
                 depth = 1,
                 account.trustAllCerts
             )
-            res.getOrElse { return@withContext Result.failure(it) }
+            val rootItems = rootRes.getOrElse { return@withContext Result.failure(it) }
+            val topDirs = rootItems.filter { it.isDirectory && it.path != "/" && it.path.isNotEmpty() }
+            discoveredFolders.addAll(topDirs)
+
+            // Recursively discover subdirectories up to safety limit
+            val queue = ArrayDeque<String>()
+            queue.addAll(topDirs.map { it.path })
+            var scans = 0
+
+            while (queue.isNotEmpty() && scans < 60) {
+                val currentPath = queue.removeFirst()
+                scans++
+                val subRes = nextcloudClient.listFolder(
+                    account.serverUrl,
+                    account.username,
+                    account.passwordOrToken,
+                    currentPath,
+                    depth = 1,
+                    account.trustAllCerts
+                )
+                if (subRes.isSuccess) {
+                    val subItems = subRes.getOrDefault(emptyList())
+                    val subDirs = subItems.filter { it.isDirectory && it.path != currentPath && it.path.isNotEmpty() }
+                    for (subDir in subDirs) {
+                        if (discoveredFolders.none { it.path == subDir.path }) {
+                            discoveredFolders.add(subDir)
+                            queue.add(subDir.path)
+                        }
+                    }
+                }
+            }
         }
 
         val existingFolders = folderDao.getAllFolders().associateBy { it.remotePath }
-        val discoveredFolders = rootRemoteItems.filter { it.isDirectory && it.path != "/" && it.path.isNotEmpty() }
 
-        // Clean up old seeded folders if discovering from a real Nextcloud server
+        // Clean up stale auto-discovered folders if connecting to real server
         if (!account.isSimulatedDemo && discoveredFolders.isNotEmpty()) {
             val serverFolderPaths = discoveredFolders.map { it.path }.toSet()
-            val stale = existingFolders.values.filter { it.remotePath !in serverFolderPaths }
+            val stale = existingFolders.values.filter { it.remotePath !in serverFolderPaths && !it.isExplicitlyConfigured }
             for (staleFolder in stale) {
                 folderDao.deleteFolder(staleFolder.remotePath)
             }
@@ -220,7 +253,7 @@ class NextcloudRepository(private val context: Context) {
                 lastSyncTime = System.currentTimeMillis()
             ) ?: SyncFolderConfigEntity(
                 remotePath = item.path,
-                localRelativePath = item.displayName,
+                localRelativePath = item.path.removePrefix("/"),
                 isSelected = shouldSyncByDefault,
                 displayName = item.displayName,
                 isExplicitlyConfigured = false,
@@ -233,10 +266,49 @@ class NextcloudRepository(private val context: Context) {
         logActivity(
             type = ActivityType.INFO,
             path = "/",
-            message = "Discovered ${discoveredFolders.size} folders on Nextcloud server."
+            message = "Discovered ${discoveredFolders.size} folders and subdirectories on Nextcloud server."
         )
 
         Result.success(folderDao.getAllFolders())
+    }
+
+    suspend fun addFolder(remotePath: String, isSelected: Boolean): SyncFolderConfigEntity = withContext(Dispatchers.IO) {
+        val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+        val name = cleanPath.substringAfterLast("/").ifEmpty { cleanPath }
+        val folder = SyncFolderConfigEntity(
+            remotePath = cleanPath,
+            localRelativePath = cleanPath.removePrefix("/"),
+            isSelected = isSelected,
+            displayName = name,
+            isExplicitlyConfigured = true,
+            remoteSize = 0L,
+            lastSyncTime = System.currentTimeMillis()
+        )
+        folderDao.insertOrUpdateFolder(folder)
+        logActivity(
+            type = ActivityType.INFO,
+            path = cleanPath,
+            message = "Added folder '$cleanPath' to sync configuration (selected: $isSelected)."
+        )
+        folder
+    }
+
+    suspend fun deleteFolder(remotePath: String) = withContext(Dispatchers.IO) {
+        folderDao.deleteFolder(remotePath)
+        logActivity(
+            type = ActivityType.INFO,
+            path = remotePath,
+            message = "Removed folder '$remotePath' from sync configuration."
+        )
+    }
+
+    suspend fun updateSyncOnMobileData(enabled: Boolean) = withContext(Dispatchers.IO) {
+        settingsDao.updateSyncOnMobileData(enabled)
+        logActivity(
+            type = ActivityType.INFO,
+            path = "/",
+            message = "Settings: Mobile data synchronization set to ${if (enabled) "ENABLED" else "DISABLED (Wi-Fi only)"}"
+        )
     }
 
     suspend fun updateQuota() = withContext(Dispatchers.IO) {

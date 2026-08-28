@@ -146,6 +146,7 @@ data class SyncSettingsEntity(
     val transferStallTimeoutSeconds: Int = 300, // No progress timeout (5 minutes = 300s) to skip stalled transfers
     val runInBackground: Boolean = true,
     val syncOnWifiOnly: Boolean = false,
+    val syncOnMobileData: Boolean = true, // Enable or disable Synchronization when on mobile data
     val syncOnChargingOnly: Boolean = false,
     val conflictStrategy: ConflictStrategy = ConflictStrategy.ASK_USER,
     val maxSyncFileSizeMb: Int = 500,

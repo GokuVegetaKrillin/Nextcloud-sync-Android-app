@@ -33,6 +33,7 @@ import com.example.data.model.SyncIntervalUnit
 import com.example.ui.MainViewModel
 import com.example.ui.theme.*
 import com.example.util.BatteryOptimizationHelper
+import com.example.util.NetworkType
 import com.example.util.StoragePermissionHelper
 import kotlinx.coroutines.launch
 import java.io.File
@@ -53,6 +54,7 @@ fun SettingsScreen(
     val isBatteryOptimizationIgnored by viewModel.batteryOptimizationIgnored.collectAsState()
     val isNotificationPermissionGranted by viewModel.notificationPermissionGranted.collectAsState()
     val isExactAlarmAllowed by viewModel.exactAlarmAllowed.collectAsState()
+    val currentNetworkType by viewModel.networkType.collectAsState()
 
     // Observe app lifecycle so returning from Android System Settings instantly refreshes permissions & status
     DisposableEffect(lifecycleOwner) {
@@ -1072,6 +1074,62 @@ fun SettingsScreen(
                             onCheckedChange = { viewModel.updateIgnoreDotFiles(it) },
                             colors = SwitchDefaults.colors(checkedTrackColor = NcPrimaryBlue),
                             modifier = Modifier.testTag("ignore_dot_files_switch")
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
+                    // Synchronize on Mobile Data
+                    val syncOnMobile = settings?.syncOnMobileData ?: true
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    "Synchronize on Mobile Data",
+                                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (syncOnMobile) NcPrimaryBlue.copy(alpha = 0.15f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                                ) {
+                                    Text(
+                                        text = if (syncOnMobile) "Cellular Allowed" else "Wi-Fi Only",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                        color = if (syncOnMobile) NcPrimaryBlue else MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                "Allow automatic and manual synchronization over cellular mobile data networks. When disabled, sync will wait for Wi-Fi.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Current connection: ${currentNetworkType.label}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (currentNetworkType == NetworkType.CELLULAR_MOBILE) {
+                                    if (syncOnMobile) NcPrimaryBlue else MaterialTheme.colorScheme.error
+                                } else if (currentNetworkType == NetworkType.WIFI || currentNetworkType == NetworkType.ETHERNET) {
+                                    NcSuccessGreen
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = syncOnMobile,
+                            onCheckedChange = { viewModel.updateSyncOnMobileData(it) },
+                            colors = SwitchDefaults.colors(checkedTrackColor = NcPrimaryBlue),
+                            modifier = Modifier.testTag("sync_on_mobile_data_switch")
                         )
                     }
 

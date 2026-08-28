@@ -138,6 +138,12 @@ interface SyncSettingsDao {
     @Query("UPDATE sync_settings SET syncNewFoldersByDefault = :syncNewByDefault WHERE id = 1")
     suspend fun updateSyncNewFoldersByDefault(syncNewByDefault: Boolean)
 
+    @Query("UPDATE sync_settings SET syncOnMobileData = :enabled, syncOnWifiOnly = NOT :enabled WHERE id = 1")
+    suspend fun updateSyncOnMobileData(enabled: Boolean)
+
+    @Query("UPDATE sync_settings SET syncOnWifiOnly = :wifiOnly, syncOnMobileData = NOT :wifiOnly WHERE id = 1")
+    suspend fun updateSyncOnWifiOnly(wifiOnly: Boolean)
+
     @Query("UPDATE sync_settings SET runInBackground = :enabled WHERE id = 1")
     suspend fun updateRunInBackground(enabled: Boolean)
 

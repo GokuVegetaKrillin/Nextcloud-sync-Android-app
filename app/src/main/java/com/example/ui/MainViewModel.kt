@@ -9,6 +9,8 @@ import com.example.data.repository.ConflictResolution
 import com.example.sync.SyncProgressState
 import com.example.sync.service.NextcloudSyncForegroundService
 import com.example.util.BatteryOptimizationHelper
+import com.example.util.NetworkHelper
+import com.example.util.NetworkType
 import com.example.util.StoragePermissionHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -69,6 +71,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _resolvingConflicts = MutableStateFlow<Set<String>>(emptySet())
     val resolvingConflicts: StateFlow<Set<String>> = _resolvingConflicts.asStateFlow()
 
+    private val _networkType = MutableStateFlow(NetworkHelper.getNetworkType(app))
+    val networkType: StateFlow<NetworkType> = _networkType.asStateFlow()
+
     init {
         refreshAllSystemStates()
         refreshLocalFiles()
@@ -80,6 +85,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _batteryOptimizationIgnored.value = BatteryOptimizationHelper.isBatteryOptimizationIgnored(app)
         _notificationPermissionGranted.value = BatteryOptimizationHelper.isNotificationPermissionGranted(app)
         _exactAlarmAllowed.value = BatteryOptimizationHelper.canScheduleExactAlarms(app)
+        _networkType.value = NetworkHelper.getNetworkType(app)
     }
 
     fun refreshStoragePermissionState() {
@@ -318,6 +324,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun updateSyncOnMobileData(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateSyncOnMobileData(enabled)
+            _networkType.value = NetworkHelper.getNetworkType(app)
+            _statusMessage.value = if (enabled) {
+                "Mobile data synchronization ENABLED"
+            } else {
+                "Mobile data synchronization DISABLED (Wi-Fi only)"
+            }
+        }
+    }
+
+    fun addCustomFolder(remotePath: String, isSelected: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val folder = repository.addFolder(remotePath, isSelected)
+            _statusMessage.value = "Added folder '${folder.remotePath}' to sync configuration"
+        }
+    }
+
+    fun removeFolder(remotePath: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteFolder(remotePath)
+            _statusMessage.value = "Removed folder '$remotePath' from sync configuration"
+        }
+    }
+
     fun updateStallTimeout(timeoutSeconds: Int) {
         viewModelScope.launch(Dispatchers.IO) {
             val safeSec = timeoutSeconds.coerceAtLeast(30)
@@ -368,6 +400,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             settObj.put("syncIntervalUnit", sett.syncIntervalUnit.name)
             settObj.put("syncNewFoldersByDefault", sett.syncNewFoldersByDefault)
             settObj.put("runInBackground", sett.runInBackground)
+            settObj.put("syncOnMobileData", sett.syncOnMobileData)
+            settObj.put("syncOnWifiOnly", sett.syncOnWifiOnly)
             settObj.put("customLocalSyncPath", sett.customLocalSyncPath)
             settObj.put("ignoreDotFilesAndFolders", sett.ignoreDotFilesAndFolders)
             settObj.put("transferStallTimeoutSeconds", sett.transferStallTimeoutSeconds)
@@ -420,6 +454,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     syncIntervalUnit = unit,
                     syncNewFoldersByDefault = settObj.optBoolean("syncNewFoldersByDefault", true),
                     runInBackground = settObj.optBoolean("runInBackground", true),
+                    syncOnMobileData = settObj.optBoolean("syncOnMobileData", true),
+                    syncOnWifiOnly = settObj.optBoolean("syncOnWifiOnly", false),
                     customLocalSyncPath = settObj.optString("customLocalSyncPath", ""),
                     ignoreDotFilesAndFolders = settObj.optBoolean("ignoreDotFilesAndFolders", true),
                     transferStallTimeoutSeconds = settObj.optInt("transferStallTimeoutSeconds", 300),

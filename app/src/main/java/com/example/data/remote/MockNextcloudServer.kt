@@ -22,30 +22,53 @@ class MockNextcloudServer(private val context: Context) {
     }
 
     private fun initializeSampleFiles() {
-        val seededMarker = File(serverRootDir, ".seeded")
+        val seededMarker = File(serverRootDir, ".seeded_v2")
         if (!seededMarker.exists()) {
             val docs = File(serverRootDir, "Documents").apply { mkdirs() }
+            val docsWork = File(docs, "Work").apply { mkdirs() }
+            val docsWorkReports = File(docsWork, "Reports").apply { mkdirs() }
+            val docsWorkPresentations = File(docsWork, "Presentations").apply { mkdirs() }
+            val docsPersonal = File(docs, "Personal").apply { mkdirs() }
+            val docsPersonalTaxes = File(docsPersonal, "Taxes").apply { mkdirs() }
+
             val photos = File(serverRootDir, "Photos").apply { mkdirs() }
-            val notes = File(serverRootDir, "Notes").apply { mkdirs() }
+            val photosVacation = File(photos, "Vacation").apply { mkdirs() }
+            val photosVacation2026 = File(photosVacation, "2026").apply { mkdirs() }
+            val photosScreenshots = File(photos, "Screenshots").apply { mkdirs() }
+
             val projects = File(serverRootDir, "Projects").apply { mkdirs() }
+            val projectsAndroid = File(projects, "Android").apply { mkdirs() }
+            val projectsAndroidSync = File(projectsAndroid, "NextcloudSync").apply { mkdirs() }
+            val projectsWeb = File(projects, "WebPortal").apply { mkdirs() }
+
+            val notes = File(serverRootDir, "Notes").apply { mkdirs() }
 
             File(docs, "Project-Roadmap.md").writeText(
                 "# Nextcloud Mobile Sync\n\n- [x] Bi-directional synchronization\n- [x] Background sync\n- [x] Selective sync\n- [x] Custom sync intervals"
             )
-            File(docs, "Nextcloud_Sync_Architecture.txt").writeText(
-                "CSync ETag reconciliation engine with local SQLite journal and conflict handling."
+            File(docsWorkReports, "Q3_Summary_Report.pdf.txt").writeText(
+                "Executive Summary: Nextcloud mobile synchronization operational review."
+            )
+            File(docsWorkPresentations, "Sync_Architecture_Deck.key.txt").writeText(
+                "Presentation slides on CSync reconciliation and TreeView selective sync."
+            )
+            File(docsPersonalTaxes, "Receipts_2026.csv").writeText(
+                "Date,Category,Amount,Description\n2026-08-01,Office,49.99,Nextcloud Subscription\n"
             )
             File(notes, "Meeting_Notes.txt").writeText(
                 "Sync interval set to custom schedule. All folders synchronized by default."
             )
-            File(projects, "App_Design_Notes.txt").writeText(
-                "Material 3 design system with Nextcloud Blue accents and accessible touch targets."
+            File(projectsAndroidSync, "App_Design_Notes.txt").writeText(
+                "Material 3 design system with Nextcloud Blue accents, TreeView widget, and accessible touch targets."
+            )
+            File(photosVacation2026, "Mountain_Hike.jpg.txt").writeText(
+                "[JPEG Image: High-resolution mountain scenic view]"
             )
             File(photos, "Cloud_Diagram.txt").writeText(
                 "[SVG/ASCII Architecture Diagram: Android Client <-> Nextcloud WebDAV API]"
             )
 
-            seededMarker.writeText("seeded")
+            seededMarker.writeText("seeded_v2")
         }
     }
 

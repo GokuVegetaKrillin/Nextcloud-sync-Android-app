@@ -31,6 +31,11 @@ class SyncEngineRobolectricTest {
         context = ApplicationProvider.getApplicationContext()
         repository = NextcloudRepository(context)
         repository.initializeDefaultsIfNeeded()
+        repository.refreshRemoteFolders()
+        val allFolders = repository.databaseInstance().syncFolderDao().getAllFolders()
+        for (f in allFolders) {
+            repository.updateFolderSelection(f.remotePath, true)
+        }
         syncEngine = SyncEngine(context, repository)
         syncScheduler = SyncScheduler(context)
     }
@@ -91,6 +96,31 @@ class SyncEngineRobolectricTest {
         repository.updateSyncNewFoldersByDefault(true)
         val settingsTrue = repository.getSettings()
         assertTrue(settingsTrue.syncNewFoldersByDefault)
+    }
+
+    @Test
+    fun testSyncOnMobileDataSetting() = runBlocking {
+        repository.updateSyncOnMobileData(false)
+        val settingsFalse = repository.getSettings()
+        assertFalse("syncOnMobileData should be false", settingsFalse.syncOnMobileData)
+
+        repository.updateSyncOnMobileData(true)
+        val settingsTrue = repository.getSettings()
+        assertTrue("syncOnMobileData should be true", settingsTrue.syncOnMobileData)
+    }
+
+    @Test
+    fun testSelectiveSubdirectorySyncWithoutParent() = runBlocking {
+        // Exclude parent "/Documents", but select child "/Documents/Work"
+        repository.updateFolderSelection("/Documents", false)
+        repository.updateFolderSelection("/Documents/Work", true)
+
+        val folders = repository.databaseInstance().syncFolderDao().getAllFolders()
+        val docFolder = folders.find { it.remotePath == "/Documents" }
+        val workFolder = folders.find { it.remotePath == "/Documents/Work" }
+
+        assertFalse("Parent Documents folder should not be selected", docFolder?.isSelected == true)
+        assertTrue("Child Work folder should be selected", workFolder?.isSelected == true)
     }
 
     @Test

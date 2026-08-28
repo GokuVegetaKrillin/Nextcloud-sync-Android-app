@@ -5,6 +5,7 @@ import com.example.data.local.AppDatabase
 import com.example.data.model.*
 import com.example.data.repository.NextcloudRepository
 import com.example.util.FileTimeHelper
+import com.example.util.NetworkHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -104,6 +105,24 @@ class SyncEngine(
                 status = SyncStatus.PAUSED,
                 currentAction = "Synchronization is disabled in settings",
                 currentFile = ""
+            )
+            return@withContext
+        }
+
+        // Network connection & mobile data validation
+        val (networkAllowed, networkReason) = NetworkHelper.checkSyncNetworkAllowed(context, settings, isManual)
+        if (!networkAllowed) {
+            val status = if (isManual) SyncStatus.ERROR else SyncStatus.IDLE
+            _syncState.value = _syncState.value.copy(
+                status = status,
+                currentAction = networkReason ?: "Network condition not met",
+                errorMessage = if (isManual) networkReason else null
+            )
+            repository.logActivity(
+                type = if (isManual) ActivityType.ERROR else ActivityType.INFO,
+                path = "/",
+                message = networkReason ?: "Sync condition not met",
+                isSuccess = !isManual
             )
             return@withContext
         }
@@ -217,13 +236,13 @@ class SyncEngine(
             allPaths.addAll(localFilesMap.keys)
             allPaths.addAll(journalMap.keys)
 
-            // Filter paths belonging to enabled folders, new local folders, or root level files
+            // Filter paths belonging to enabled folders (or subdirectories) or root level files
             val targetPaths = allPaths.filter { path ->
                 val isRootFile = !path.removePrefix("/").contains("/")
-                val isLocalOnlyDir = localFilesMap[path]?.isDirectory == true
-                isRootFile || isLocalOnlyDir || enabledFolders.any { folder ->
+                val belongsToSelected = enabledFolders.any { folder ->
                     path == folder.remotePath || path.startsWith("${folder.remotePath}/")
                 }
+                isRootFile || belongsToSelected
             }.sortedWith(compareBy({ !it.contains("/") }, { it.count { c -> c == '/' } }, { it }))
 
             if (targetPaths.isEmpty() && enabledFolders.isEmpty()) {
