@@ -44,15 +44,20 @@ data class TreeNode(
     val depth: Int,
     val folder: SyncFolderConfigEntity?,
     val isSelected: Boolean,
+    val isInheritedFromParent: Boolean = false,
+    val parentSelectedName: String? = null,
     val isSynthesized: Boolean = false,
     val children: MutableList<TreeNode> = mutableListOf()
 ) {
     fun isLeaf(): Boolean = children.isEmpty()
 
+    val isEffectivelySelected: Boolean
+        get() = isSelected || isInheritedFromParent
+
     fun selectedDescendantsCount(): Int {
         var count = 0
         for (child in children) {
-            if (child.isSelected) count++
+            if (child.isEffectivelySelected) count++
             count += child.selectedDescendantsCount()
         }
         return count
@@ -77,7 +82,28 @@ data class TreeNode(
 }
 
 /**
- * Builds a clean N-level recursive tree from flat folder list, synthesizing any missing intermediate nodes.
+ * Checks if any ancestor of [path] is currently selected in [folders].
+ */
+fun findSelectedAncestor(path: String, folders: List<SyncFolderConfigEntity>): SyncFolderConfigEntity? {
+    val cleanPath = "/" + path.trim('/')
+    val parts = cleanPath.split('/').filter { it.isNotEmpty() }
+    if (parts.size <= 1) return null
+
+    val folderMap = folders.associateBy { "/" + it.remotePath.trim('/') }
+    var current = ""
+    for (i in 0 until parts.size - 1) {
+        current += "/${parts[i]}"
+        val ancestor = folderMap[current]
+        if (ancestor != null && ancestor.isSelected) {
+            return ancestor
+        }
+    }
+    return null
+}
+
+/**
+ * Builds a clean N-level recursive tree from flat folder list, synthesizing any missing intermediate nodes
+ * and calculating parent-child sync inheritance.
  */
 private fun buildHierarchyTree(folders: List<SyncFolderConfigEntity>, searchQuery: String): List<TreeNode> {
     if (folders.isEmpty()) return emptyList()
@@ -107,6 +133,10 @@ private fun buildHierarchyTree(folders: List<SyncFolderConfigEntity>, searchQuer
         val depth = (parts.size - 1).coerceAtLeast(0)
         val name = if (parts.isNotEmpty()) parts.last() else "Root"
 
+        val ancestor = findSelectedAncestor(path, folders)
+        val isInherited = ancestor != null
+        val parentName = ancestor?.displayName ?: ancestor?.remotePath
+
         val node = TreeNode(
             id = path,
             name = entity?.displayName ?: name,
@@ -114,6 +144,8 @@ private fun buildHierarchyTree(folders: List<SyncFolderConfigEntity>, searchQuer
             depth = depth,
             folder = entity,
             isSelected = entity?.isSelected ?: false,
+            isInheritedFromParent = isInherited,
+            parentSelectedName = parentName,
             isSynthesized = entity == null
         )
         nodeMap[path] = node
@@ -161,6 +193,16 @@ private fun buildHierarchyTree(folders: List<SyncFolderConfigEntity>, searchQuer
     return rootNodes
 }
 
+data class UnselectWarningData(
+    val path: String,
+    val displayName: String
+)
+
+data class ParentLockedInfoData(
+    val subfolderName: String,
+    val parentName: String
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FoldersScreen(
@@ -177,7 +219,11 @@ fun FoldersScreen(
 
     var showAddFolderDialog by remember { mutableStateOf(false) }
     var addFolderParentPath by remember { mutableStateOf<String?>(null) }
-    var selectedNodeForMenu by remember { mutableStateOf<TreeNode?>(null) }
+
+    // Dialog States
+    var unselectWarning by remember { mutableStateOf<UnselectWarningData?>(null) }
+    var parentLockedInfo by remember { mutableStateOf<ParentLockedInfoData?>(null) }
+    var showDeselectAllWarning by remember { mutableStateOf(false) }
 
     val treeNodes = remember(folders, searchQuery) {
         buildHierarchyTree(folders, searchQuery)
@@ -202,6 +248,29 @@ fun FoldersScreen(
                 if (!expandedPaths.containsKey(clean)) {
                     expandedPaths[clean] = true
                 }
+            }
+        }
+    }
+
+    // Handler for toggling selection safely with hierarchical constraints and warning
+    fun handleFolderToggle(path: String, displayName: String, targetSelected: Boolean, isInherited: Boolean, parentName: String?) {
+        if (targetSelected) {
+            // Selecting is always allowed directly: selects this folder and all its subfolders
+            viewModel.toggleFolderSelection(path, true)
+        } else {
+            // User wants to UNSELECT
+            if (isInherited) {
+                // Blocked: Cannot unselect subfolder while parent is selected
+                parentLockedInfo = ParentLockedInfoData(
+                    subfolderName = displayName,
+                    parentName = parentName ?: "parent folder"
+                )
+            } else {
+                // Show warning dialog about local deletion
+                unselectWarning = UnselectWarningData(
+                    path = path,
+                    displayName = displayName
+                )
             }
         }
     }
@@ -314,7 +383,7 @@ fun FoldersScreen(
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                             )
                             Text(
-                                text = "Select directories or specific subdirectories to sync independently",
+                                text = "Synchronize entire directory trees or selective subdirectories",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -447,10 +516,9 @@ fun FoldersScreen(
 
                             OutlinedButton(
                                 onClick = {
-                                    folders.forEach { folder ->
-                                        if (folder.isSelected) {
-                                            viewModel.toggleFolderSelection(folder.remotePath, false)
-                                        }
+                                    val selectedCount = folders.count { it.isSelected }
+                                    if (selectedCount > 0) {
+                                        showDeselectAllWarning = true
                                     }
                                 },
                                 shape = RoundedCornerShape(8.dp),
@@ -491,7 +559,7 @@ fun FoldersScreen(
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Tap 'Scan Server Folders' or tap the '+' button below to discover and configure folders from your Nextcloud server.",
+                                text = "Tap 'Scan server folders' or tap the '+' button to discover and configure folders from your Nextcloud server.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -505,10 +573,22 @@ fun FoldersScreen(
                 }
 
                 items(filteredFolders, key = { it.remotePath }) { folder ->
+                    val ancestor = findSelectedAncestor(folder.remotePath, folders)
+                    val isInherited = ancestor != null
+                    val parentName = ancestor?.displayName ?: ancestor?.remotePath
+
                     FolderSyncItemCard(
                         folder = folder,
+                        isInheritedFromParent = isInherited,
+                        parentSelectedName = parentName,
                         onToggleSelection = { isSelected ->
-                            viewModel.toggleFolderSelection(folder.remotePath, isSelected)
+                            handleFolderToggle(
+                                path = folder.remotePath,
+                                displayName = folder.displayName,
+                                targetSelected = isSelected,
+                                isInherited = isInherited,
+                                parentName = parentName
+                            )
                         },
                         onAddSubfolder = {
                             addFolderParentPath = folder.remotePath
@@ -517,7 +597,7 @@ fun FoldersScreen(
                     )
                 }
             } else {
-                // HIERARCHICAL TREE VIEW (AmrDeveloper/treeview style)
+                // HIERARCHICAL TREE VIEW (Multi-level Treeview)
                 fun addTreeItems(
                     nodes: List<TreeNode>,
                     targetList: MutableList<TreeNode>
@@ -543,17 +623,17 @@ fun FoldersScreen(
                             expandedPaths[node.path] = !isExpanded
                         },
                         onToggleSelection = { isSelected ->
-                            viewModel.toggleFolderSelection(node.path, isSelected)
+                            handleFolderToggle(
+                                path = node.path,
+                                displayName = node.name,
+                                targetSelected = isSelected,
+                                isInherited = node.isInheritedFromParent,
+                                parentName = node.parentSelectedName
+                            )
                         },
                         onAddSubfolder = {
                             addFolderParentPath = node.path
                             showAddFolderDialog = true
-                        },
-                        onSelectSubtree = { select ->
-                            viewModel.toggleFolderSelection(node.path, select)
-                            for (descPath in node.getAllDescendantPaths()) {
-                                viewModel.toggleFolderSelection(descPath, select)
-                            }
                         }
                     )
                 }
@@ -584,7 +664,7 @@ fun FoldersScreen(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Just like Nextcloud Desktop Client, you can synchronize specific subdirectories deep inside parent folders without synchronizing the entire parent folder. Unselected directories remain safely on your Nextcloud cloud server without consuming local device storage.",
+                            text = "• Selecting a parent folder automatically synchronizes all its subfolders.\n• Subfolders are locked in sync while the parent is selected.\n• Unselecting a parent folder removes local files (freeing space) and unselects all its subfolders.\n• Once the parent is unselected, you can selectively re-select any individual subfolders you need.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -592,6 +672,181 @@ fun FoldersScreen(
                 }
             }
         }
+    }
+
+    // Unselect Warning Dialog
+    unselectWarning?.let { warningData ->
+        AlertDialog(
+            onDismissRequest = { unselectWarning = null },
+            icon = {
+                Icon(
+                    Icons.Outlined.WarningAmber,
+                    contentDescription = "Warning",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(36.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Unselect Folder & Delete Local Copy?",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Unselecting \"${warningData.displayName}\" and all its subfolders from synchronization will delete the local files from this device to free up storage.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Filled.CloudDone,
+                                contentDescription = null,
+                                tint = NcPrimaryBlue,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "All remote files remain safely preserved on your Nextcloud server.",
+                                style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val path = warningData.path
+                        unselectWarning = null
+                        viewModel.toggleFolderSelection(path, false)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("confirm_unselect_folder_btn")
+                ) {
+                    Text("Proceed (Delete Locally)")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { unselectWarning = null },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.testTag("cancel_unselect_folder_btn")
+                ) {
+                    Text("Cancel (Keep Synced)")
+                }
+            }
+        )
+    }
+
+    // Parent Folder Locked Info Dialog
+    parentLockedInfo?.let { infoData ->
+        AlertDialog(
+            onDismissRequest = { parentLockedInfo = null },
+            icon = {
+                Icon(
+                    Icons.Filled.Lock,
+                    contentDescription = "Parent folder selected",
+                    tint = NcPrimaryBlue,
+                    modifier = Modifier.size(36.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Subfolder Included in Sync",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "The subfolder \"${infoData.subfolderName}\" is automatically synchronized because its parent folder \"${infoData.parentName}\" is selected.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "To unselect this subfolder, first unselect the parent folder. You will then be able to selectively re-select any specific subfolders you want.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { parentLockedInfo = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Understood")
+                }
+            }
+        )
+    }
+
+    // Deselect All Warning Dialog
+    if (showDeselectAllWarning) {
+        AlertDialog(
+            onDismissRequest = { showDeselectAllWarning = false },
+            icon = {
+                Icon(
+                    Icons.Outlined.WarningAmber,
+                    contentDescription = "Warning",
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(36.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = "Unselect All Folders?",
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Text(
+                    text = "This will unselect all folders from synchronization and delete their local copies from this device.\n\nAll files will remain safely stored on your Nextcloud server.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeselectAllWarning = false
+                        folders.forEach { folder ->
+                            if (folder.isSelected) {
+                                viewModel.toggleFolderSelection(folder.remotePath, false)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Proceed (Unselect All)")
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showDeselectAllWarning = false },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     if (showAddFolderDialog) {
@@ -611,7 +866,7 @@ fun FoldersScreen(
 
 /**
  * Tree View Node Row with indentation guides, expand/collapse chevron, folder icon,
- * independent selection checkbox, selective descendant indicators, and quick subtree actions.
+ * parent sync lock indicator, selective descendant indicators, and add subfolder action.
  */
 @Composable
 private fun TreeViewNodeRow(
@@ -619,16 +874,15 @@ private fun TreeViewNodeRow(
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onToggleSelection: (Boolean) -> Unit,
-    onAddSubfolder: () -> Unit,
-    onSelectSubtree: (Boolean) -> Unit
+    onAddSubfolder: () -> Unit
 ) {
     val depth = node.depth
     val hasChildren = !node.isLeaf()
+    val isInherited = node.isInheritedFromParent
+    val isEffectivelySelected = node.isEffectivelySelected
     val selectedDescendants = remember(node) { node.selectedDescendantsCount() }
     val totalDescendants = remember(node) { node.totalDescendantsCount() }
-    val isPartiallySelected = !node.isSelected && selectedDescendants > 0
-
-    var showMenu by remember { mutableStateOf(false) }
+    val isPartiallySelected = !isEffectivelySelected && selectedDescendants > 0
 
     val rotationAngle by animateFloatAsState(
         targetValue = if (isExpanded) 90f else 0f,
@@ -639,7 +893,8 @@ private fun TreeViewNodeRow(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = when {
-                node.isSelected -> NcPrimaryBlue.copy(alpha = 0.08f)
+                isInherited -> NcPrimaryBlue.copy(alpha = 0.05f)
+                node.isSelected -> NcPrimaryBlue.copy(alpha = 0.09f)
                 isPartiallySelected -> NcCyanAccent.copy(alpha = 0.08f)
                 else -> MaterialTheme.colorScheme.surface
             }
@@ -648,14 +903,15 @@ private fun TreeViewNodeRow(
             1.dp,
             when {
                 node.isSelected -> NcPrimaryBlue.copy(alpha = 0.35f)
+                isInherited -> NcPrimaryBlue.copy(alpha = 0.2f)
                 isPartiallySelected -> NcCyanAccent.copy(alpha = 0.4f)
                 else -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
             }
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (node.isSelected || isPartiallySelected) 1.dp else 0.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isEffectivelySelected || isPartiallySelected) 1.dp else 0.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = (depth * 20).dp)
+            .padding(start = (depth * 18).dp)
             .testTag("tree_node_${node.path}")
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -665,7 +921,7 @@ private fun TreeViewNodeRow(
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. Expand / Collapse Chevron Button (or space if leaf)
+                // 1. Expand / Collapse Chevron Button (or dot if leaf)
                 if (hasChildren) {
                     IconButton(
                         onClick = onToggleExpand,
@@ -691,33 +947,33 @@ private fun TreeViewNodeRow(
                     }
                 }
 
-                // 2. Folder Icon (Open vs Closed)
+                // 2. Folder Icon
                 Box(
                     modifier = Modifier
                         .size(36.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(
                             when {
-                                node.isSelected -> NcPrimaryBlue.copy(alpha = 0.18f)
+                                isEffectivelySelected -> NcPrimaryBlue.copy(alpha = 0.18f)
                                 isPartiallySelected -> NcCyanAccent.copy(alpha = 0.15f)
                                 else -> MaterialTheme.colorScheme.surfaceVariant
                             }
                         )
                         .clickable {
-                            if (hasChildren) onToggleExpand() else onToggleSelection(!node.isSelected)
+                            if (hasChildren) onToggleExpand() else onToggleSelection(!isEffectivelySelected)
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = when {
                             hasChildren && isExpanded -> Icons.Filled.FolderOpen
-                            node.isSelected -> Icons.Filled.Folder
+                            isEffectivelySelected -> Icons.Filled.Folder
                             isPartiallySelected -> Icons.Filled.FolderSpecial
                             else -> Icons.Outlined.Folder
                         },
                         contentDescription = node.name,
                         tint = when {
-                            node.isSelected -> NcPrimaryBlue
+                            isEffectivelySelected -> NcPrimaryBlue
                             isPartiallySelected -> NcCyanAccent
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
@@ -727,11 +983,11 @@ private fun TreeViewNodeRow(
 
                 Spacer(modifier = Modifier.width(10.dp))
 
-                // 3. Folder Name, Path & Selective Sync Badge
+                // 3. Folder Name, Path & Sync State Badges
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .clickable { onToggleSelection(!node.isSelected) }
+                        .clickable { onToggleSelection(!isEffectivelySelected) }
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -740,7 +996,7 @@ private fun TreeViewNodeRow(
                         Text(
                             text = node.name,
                             style = MaterialTheme.typography.bodyMedium.copy(
-                                fontWeight = if (node.isSelected || isPartiallySelected) FontWeight.Bold else FontWeight.Medium
+                                fontWeight = if (isEffectivelySelected || isPartiallySelected) FontWeight.Bold else FontWeight.Medium
                             ),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -776,8 +1032,24 @@ private fun TreeViewNodeRow(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    // Selective Sync Status Indicators
-                    if (isPartiallySelected) {
+                    // Sync Status Badges
+                    if (isInherited) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.Lock,
+                                contentDescription = "Inherited",
+                                tint = NcPrimaryBlue,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Included via parent (${node.parentSelectedName ?: "parent"})",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+                                color = NcPrimaryBlue
+                            )
+                        }
+                    } else if (isPartiallySelected) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
@@ -796,66 +1068,32 @@ private fun TreeViewNodeRow(
                     } else if (node.isSelected && selectedDescendants > 0) {
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "Folder + $selectedDescendants subfolders synced",
+                            text = "Folder + all $selectedDescendants subfolders synced",
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
                             color = NcPrimaryBlue
                         )
                     }
                 }
 
-                // 4. More Options (Subtree actions, add subfolder)
-                Box {
-                    IconButton(
-                        onClick = { showMenu = true },
-                        modifier = Modifier.size(32.dp).testTag("folder_menu_btn_${node.name}")
-                    ) {
-                        Icon(
-                            Icons.Filled.MoreVert,
-                            contentDescription = "Folder options",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-
-                    DropdownMenu(
-                        expanded = showMenu,
-                        onDismissRequest = { showMenu = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Add Subfolder Here") },
-                            leadingIcon = { Icon(Icons.Filled.CreateNewFolder, contentDescription = null, tint = NcPrimaryBlue) },
-                            onClick = {
-                                showMenu = false
-                                onAddSubfolder()
-                            }
-                        )
-                        if (hasChildren) {
-                            DropdownMenuItem(
-                                text = { Text("Select Folder & All Subfolders") },
-                                leadingIcon = { Icon(Icons.Filled.SelectAll, contentDescription = null, tint = NcPrimaryBlue) },
-                                onClick = {
-                                    showMenu = false
-                                    onSelectSubtree(true)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Deselect Subtree") },
-                                leadingIcon = { Icon(Icons.Filled.Deselect, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    showMenu = false
-                                    onSelectSubtree(false)
-                                }
-                            )
-                        }
-                    }
+                // 4. Add Subfolder Action
+                IconButton(
+                    onClick = onAddSubfolder,
+                    modifier = Modifier.size(32.dp).testTag("add_subfolder_btn_${node.name}")
+                ) {
+                    Icon(
+                        Icons.Filled.CreateNewFolder,
+                        contentDescription = "Add subfolder",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
 
-                // 5. Individual Folder Selection Checkbox
+                // 5. Selection Checkbox
                 Checkbox(
-                    checked = node.isSelected,
+                    checked = isEffectivelySelected,
                     onCheckedChange = { onToggleSelection(it) },
                     colors = CheckboxDefaults.colors(
-                        checkedColor = NcPrimaryBlue
+                        checkedColor = if (isInherited) NcPrimaryBlue.copy(alpha = 0.7f) else NcPrimaryBlue
                     ),
                     modifier = Modifier.testTag("checkbox_${node.name}")
                 )
@@ -867,18 +1105,22 @@ private fun TreeViewNodeRow(
 @Composable
 private fun FolderSyncItemCard(
     folder: SyncFolderConfigEntity,
+    isInheritedFromParent: Boolean,
+    parentSelectedName: String?,
     onToggleSelection: (Boolean) -> Unit,
     onAddSubfolder: () -> Unit
 ) {
+    val isEffectivelySelected = folder.isSelected || isInheritedFromParent
+
     Card(
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = if (folder.isSelected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            containerColor = if (isEffectivelySelected) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         ),
-        elevation = CardDefaults.cardElevation(defaultElevation = if (folder.isSelected) 1.dp else 0.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (isEffectivelySelected) 1.dp else 0.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggleSelection(!folder.isSelected) }
+            .clickable { onToggleSelection(!isEffectivelySelected) }
             .testTag("folder_item_${folder.displayName}")
     ) {
         Row(
@@ -897,14 +1139,14 @@ private fun FolderSyncItemCard(
                         .size(44.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(
-                            if (folder.isSelected) NcPrimaryBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
+                            if (isEffectivelySelected) NcPrimaryBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
                         ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = if (folder.isSelected) Icons.Filled.Folder else Icons.Outlined.FolderOff,
+                        imageVector = if (isEffectivelySelected) Icons.Filled.Folder else Icons.Outlined.FolderOff,
                         contentDescription = folder.displayName,
-                        tint = if (folder.isSelected) NcPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (isEffectivelySelected) NcPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -915,17 +1157,34 @@ private fun FolderSyncItemCard(
                     Text(
                         text = folder.displayName,
                         style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = if (folder.isSelected) FontWeight.Bold else FontWeight.Normal
+                            fontWeight = if (isEffectivelySelected) FontWeight.Bold else FontWeight.Normal
                         ),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Path: ${folder.remotePath} • ${if (folder.isSelected) "Synchronized" else "Excluded"}",
+                        text = "Path: ${folder.remotePath} • ${if (isEffectivelySelected) "Synchronized" else "Excluded"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (isInheritedFromParent) {
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Filled.Lock,
+                                contentDescription = null,
+                                tint = NcPrimaryBlue,
+                                modifier = Modifier.size(11.dp)
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "Included via parent (${parentSelectedName ?: "parent"})",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.SemiBold),
+                                color = NcPrimaryBlue
+                            )
+                        }
+                    }
                 }
             }
 
@@ -943,10 +1202,10 @@ private fun FolderSyncItemCard(
                 }
 
                 Checkbox(
-                    checked = folder.isSelected,
+                    checked = isEffectivelySelected,
                     onCheckedChange = { onToggleSelection(it) },
                     colors = CheckboxDefaults.colors(
-                        checkedColor = NcPrimaryBlue
+                        checkedColor = if (isInheritedFromParent) NcPrimaryBlue.copy(alpha = 0.7f) else NcPrimaryBlue
                     ),
                     modifier = Modifier.testTag("checkbox_${folder.displayName}")
                 )

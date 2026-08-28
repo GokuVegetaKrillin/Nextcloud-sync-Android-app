@@ -363,6 +363,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _resolvingConflicts.update { it + remotePath }
             try {
                 repository.resolveConflict(remotePath, resolution)
+                syncEngine.refreshConflictStatus()
                 refreshLocalFiles()
                 _statusMessage.value = "Conflict resolved successfully ($remotePath)"
             } catch (e: Exception) {

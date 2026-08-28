@@ -111,6 +111,7 @@ fun DashboardScreen(
         item {
             SyncHeroCard(
                 syncState = syncState,
+                unresolvedConflictsCount = conflicts.size,
                 rotation = rotation,
                 onSyncNow = { viewModel.startSync() },
                 onPauseSync = { viewModel.pauseSync() },
@@ -340,6 +341,7 @@ private fun ServerConnectionCard(
 @Composable
 private fun SyncHeroCard(
     syncState: SyncProgressState,
+    unresolvedConflictsCount: Int = 0,
     rotation: Float,
     onSyncNow: () -> Unit,
     onPauseSync: () -> Unit,
@@ -347,6 +349,16 @@ private fun SyncHeroCard(
     onCancelSync: () -> Unit
 ) {
     val isSyncing = syncState.status == SyncStatus.SYNCING
+    val effectiveStatus = if (syncState.status == SyncStatus.CONFLICT && unresolvedConflictsCount == 0) {
+        SyncStatus.SUCCESS
+    } else {
+        syncState.status
+    }
+    val effectiveAction = if (syncState.status == SyncStatus.CONFLICT && unresolvedConflictsCount == 0) {
+        "All conflicts resolved • Files synchronized"
+    } else {
+        syncState.currentAction
+    }
 
     Card(
         shape = RoundedCornerShape(20.dp),
@@ -402,7 +414,7 @@ private fun SyncHeroCard(
                     }
                 }
 
-                SyncStatusBadge(status = syncState.status)
+                SyncStatusBadge(status = effectiveStatus)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -415,7 +427,7 @@ private fun SyncHeroCard(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = syncState.currentAction,
+                            text = effectiveAction,
                             style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -466,7 +478,7 @@ private fun SyncHeroCard(
                 }
             } else {
                 Text(
-                    text = syncState.currentAction,
+                    text = effectiveAction,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

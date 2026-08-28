@@ -180,6 +180,12 @@ class SyncEngine(
             val currentFolders = folderDao.getAllFolders()
             val enabledFolders = currentFolders.filter { it.isSelected }
 
+            // 3b. Sanitize journal: Purge any journal entries belonging to unselected folders
+            val unselectedFolders = currentFolders.filter { !it.isSelected }
+            for (unselected in unselectedFolders) {
+                journalDao.deleteByPathPrefix(unselected.remotePath)
+            }
+
             // 4. Discover all remote items recursively inside enabled folders + root files
             _syncState.value = _syncState.value.copy(currentAction = "Indexing Nextcloud remote files...")
             val allRemoteItemsMap = mutableMapOf<String, WebDavItem>()
@@ -258,6 +264,8 @@ class SyncEngine(
                 totalFilesCount = targetPaths.size,
                 currentAction = "Synchronizing files..."
             )
+
+            val newlyCreatedLocalDirsInThisRun = mutableSetOf<String>()
 
             // 8. Reconcile each path
             for (path in targetPaths) {
@@ -407,82 +415,40 @@ class SyncEngine(
                         }
                     } else if (remote != null && local == null) {
                         // Item exists in remote, not in local
-                        if (journal != null) {
-                            // Deletion propagation with safeguards
-                            val parentDir = targetLocalFile.parentFile
-                            val isParentValid = parentDir != null && parentDir.exists()
-                            
-                            if (isParentValid && remote.etag == journal.remoteEtag) {
-                                // Local deletion confirmed and remote was not modified in the meantime
-                                _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
-                                if (account.isSimulatedDemo) {
-                                    repository.mockServer.deleteItem(path)
-                                } else {
-                                    repository.nextcloudClient.deleteItem(
-                                        account.serverUrl,
-                                        account.username,
-                                        account.passwordOrToken,
-                                        path,
-                                        account.trustAllCerts
-                                    )
-                                }
-                                journalDao.deleteByRemotePath(path)
-                                repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
+                        val parentDir = targetLocalFile.parentFile
+                        val parentRelativePath = "/" + (parentDir?.relativeTo(localBaseDir)?.path?.replace('\\', '/') ?: "").trim('/')
+                        
+                        // Local deletion confirmed ONLY if:
+                        // 1. Parent folder existed in local filesystem at start of this sync
+                        // 2. Not located within a folder newly created during this sync run
+                        // 3. Remote etag exactly matches previous journal etag
+                        val parentExistedAtStart = parentDir != null && parentDir.exists() && (parentRelativePath == "/" || localFilesMap.containsKey(parentRelativePath))
+                        val isInsideNewlyCreatedDir = newlyCreatedLocalDirsInThisRun.any { dirPath ->
+                            path == dirPath || path.startsWith("$dirPath/")
+                        }
+                        val isConfirmedLocalDeletion = journal != null && parentExistedAtStart && !isInsideNewlyCreatedDir && (remote.etag == journal.remoteEtag)
+
+                        if (isConfirmedLocalDeletion) {
+                            // Local deletion confirmed and remote was not modified in the meantime
+                            _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
+                            if (account.isSimulatedDemo) {
+                                repository.mockServer.deleteItem(path)
                             } else {
-                                // Safeguard: Parent directory was missing/unmounted or remote changed on server! Re-download server file to protect against data loss.
-                                if (remote.isDirectory) {
-                                    targetLocalFile.mkdirs()
-                                    journalDao.insertOrUpdate(
-                                        SyncJournalEntryEntity(
-                                            remotePath = path,
-                                            localRelativePath = relativeLocalPath,
-                                            isDirectory = true,
-                                            remoteEtag = remote.etag,
-                                            remoteSize = 0L,
-                                            remoteMtime = remote.lastModified,
-                                            localSize = 0L,
-                                            localMtime = targetLocalFile.lastModified(),
-                                            fileId = remote.fileId ?: ""
-                                        )
-                                    )
-                                } else {
-                                    val etag = if (account.isSimulatedDemo) {
-                                        repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
-                                    } else {
-                                        repository.nextcloudClient.downloadFile(
-                                            account.serverUrl,
-                                            account.username,
-                                            account.passwordOrToken,
-                                            path,
-                                            targetLocalFile,
-                                            account.trustAllCerts,
-                                            stallTimeout
-                                        ).getOrNull() ?: remote.etag
-                                    }
-                                    if (remote.lastModified > 0L) {
-                                        FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
-                                    }
-                                    bytesTransferred += targetLocalFile.length()
-                                    journalDao.insertOrUpdate(
-                                        SyncJournalEntryEntity(
-                                            remotePath = path,
-                                            localRelativePath = relativeLocalPath,
-                                            isDirectory = false,
-                                            remoteEtag = etag,
-                                            remoteSize = targetLocalFile.length(),
-                                            remoteMtime = remote.lastModified,
-                                            localSize = targetLocalFile.length(),
-                                            localMtime = targetLocalFile.lastModified(),
-                                            fileId = remote.fileId ?: ""
-                                        )
-                                    )
-                                    repository.logActivity(ActivityType.DOWNLOAD, path, "Safeguard: Preserved Nextcloud file '${targetLocalFile.name}'", targetLocalFile.length())
-                                }
+                                repository.nextcloudClient.deleteItem(
+                                    account.serverUrl,
+                                    account.username,
+                                    account.passwordOrToken,
+                                    path,
+                                    account.trustAllCerts
+                                )
                             }
+                            journalDao.deleteByRemotePath(path)
+                            repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
                         } else {
-                            // New remote item -> Download to local!
+                            // Download remote item to local (new remote file or re-selected folder protection)
                             if (remote.isDirectory) {
                                 targetLocalFile.mkdirs()
+                                newlyCreatedLocalDirsInThisRun.add(path)
                                 journalDao.insertOrUpdate(
                                     SyncJournalEntryEntity(
                                         remotePath = path,
@@ -529,7 +495,13 @@ class SyncEngine(
                                         fileId = remote.fileId ?: ""
                                     )
                                 )
-                                repository.logActivity(ActivityType.DOWNLOAD, path, "Downloaded new file from Nextcloud", targetLocalFile.length())
+                                repository.logActivity(
+                                    ActivityType.DOWNLOAD,
+                                    path,
+                                    if (journal != null) "Safeguard: Downloaded Nextcloud file '${targetLocalFile.name}' (re-selected folder protection)"
+                                    else "Downloaded new file from Nextcloud",
+                                    targetLocalFile.length()
+                                )
                             }
                         }
                     } else if (remote == null && local != null) {
@@ -890,6 +862,16 @@ class SyncEngine(
             } else {
                 outMap[childRemotePath] = child
             }
+        }
+    }
+
+    suspend fun refreshConflictStatus() {
+        val unresolved = conflictDao.getUnresolvedConflicts()
+        if (unresolved.isEmpty() && _syncState.value.status == SyncStatus.CONFLICT) {
+            _syncState.value = _syncState.value.copy(
+                status = SyncStatus.SUCCESS,
+                currentAction = "All conflicts resolved • Files synchronized"
+            )
         }
     }
 }

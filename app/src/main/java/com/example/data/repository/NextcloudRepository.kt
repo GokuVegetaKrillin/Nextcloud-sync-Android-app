@@ -209,7 +209,7 @@ class NextcloudRepository(private val context: Context) {
             queue.addAll(topDirs.map { it.path })
             var scans = 0
 
-            while (queue.isNotEmpty() && scans < 60) {
+            while (queue.isNotEmpty() && scans < 300) {
                 val currentPath = queue.removeFirst()
                 scans++
                 val subRes = nextcloudClient.listFolder(
@@ -294,11 +294,18 @@ class NextcloudRepository(private val context: Context) {
     }
 
     suspend fun deleteFolder(remotePath: String) = withContext(Dispatchers.IO) {
-        folderDao.deleteFolder(remotePath)
+        val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+        folderDao.deleteFolderAndSubfolders(cleanPath)
+        val targetDir = File(localSyncRootDir, cleanPath.removePrefix("/"))
+        if (targetDir.exists()) {
+            targetDir.deleteRecursively()
+        }
+        journalDao.deleteByPathPrefix(cleanPath)
+        conflictDao.deleteConflictsByPathPrefix(cleanPath)
         logActivity(
             type = ActivityType.INFO,
-            path = remotePath,
-            message = "Removed folder '$remotePath' from sync configuration."
+            path = cleanPath,
+            message = "Removed folder '$cleanPath' and subfolders from sync configuration."
         )
     }
 
@@ -324,12 +331,39 @@ class NextcloudRepository(private val context: Context) {
     }
 
     suspend fun updateFolderSelection(remotePath: String, isSelected: Boolean) = withContext(Dispatchers.IO) {
-        folderDao.updateFolderSelection(remotePath, isSelected)
-        logActivity(
-            type = ActivityType.INFO,
-            path = remotePath,
-            message = "Selective sync: Folder '$remotePath' is now ${if (isSelected) "Synchronized" else "Excluded"}"
-        )
+        val cleanPath = if (remotePath.startsWith("/")) remotePath else "/$remotePath"
+        folderDao.updateFolderAndSubfoldersSelection(cleanPath, isSelected)
+        
+        if (!isSelected) {
+            // 1. Delete local folder and all its files recursively from device storage
+            val targetDir = File(localSyncRootDir, cleanPath.removePrefix("/"))
+            if (targetDir.exists()) {
+                targetDir.deleteRecursively()
+            }
+            // 2. CRITICAL PURGE: Delete all journal entries for this folder and all subfolders
+            // This guarantees that when the folder is later re-selected, the sync engine will NOT
+            // misinterpret the missing local files as local deletions and will NOT delete remote server files!
+            journalDao.deleteByPathPrefix(cleanPath)
+            
+            // 3. Delete any unresolved conflicts for this folder tree
+            conflictDao.deleteConflictsByPathPrefix(cleanPath)
+            
+            logActivity(
+                type = ActivityType.INFO,
+                path = cleanPath,
+                message = "Selective sync: Unselected '$cleanPath' and all subfolders. Local files deleted; Nextcloud remote files kept safe."
+            )
+        } else {
+            // CRITICAL PURGE ON RE-SELECTION:
+            // Ensure no stale journal entries exist for this path prefix so that Nextcloud files are downloaded cleanly
+            journalDao.deleteByPathPrefix(cleanPath)
+            
+            logActivity(
+                type = ActivityType.INFO,
+                path = cleanPath,
+                message = "Selective sync: Selected '$cleanPath' and all subfolders for synchronization."
+            )
+        }
     }
 
     suspend fun updateSyncEnabled(enabled: Boolean) = withContext(Dispatchers.IO) {

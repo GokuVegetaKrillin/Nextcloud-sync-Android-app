@@ -45,8 +45,14 @@ interface SyncFolderDao {
     @Query("UPDATE sync_folders SET isSelected = :isSelected WHERE remotePath = :remotePath")
     suspend fun updateFolderSelection(remotePath: String, isSelected: Boolean)
 
+    @Query("UPDATE sync_folders SET isSelected = :isSelected WHERE remotePath = :remotePath OR remotePath LIKE :remotePath || '/%'")
+    suspend fun updateFolderAndSubfoldersSelection(remotePath: String, isSelected: Boolean)
+
     @Query("DELETE FROM sync_folders WHERE remotePath = :remotePath")
     suspend fun deleteFolder(remotePath: String)
+
+    @Query("DELETE FROM sync_folders WHERE remotePath = :remotePath OR remotePath LIKE :remotePath || '/%'")
+    suspend fun deleteFolderAndSubfolders(remotePath: String)
 
     @Query("DELETE FROM sync_folders")
     suspend fun deleteAllFolders()
@@ -68,6 +74,9 @@ interface SyncJournalDao {
 
     @Query("DELETE FROM sync_journal WHERE remotePath = :remotePath")
     suspend fun deleteByRemotePath(remotePath: String)
+
+    @Query("DELETE FROM sync_journal WHERE remotePath = :pathPrefix OR remotePath LIKE :pathPrefix || '/%'")
+    suspend fun deleteByPathPrefix(pathPrefix: String)
 
     @Query("DELETE FROM sync_journal")
     suspend fun clearJournal()
@@ -107,6 +116,9 @@ interface ConflictDao {
 
     @Query("DELETE FROM sync_conflicts WHERE remotePath = :remotePath")
     suspend fun deleteConflict(remotePath: String)
+
+    @Query("DELETE FROM sync_conflicts WHERE remotePath = :pathPrefix OR remotePath LIKE :pathPrefix || '/%'")
+    suspend fun deleteConflictsByPathPrefix(pathPrefix: String)
 
     @Query("DELETE FROM sync_conflicts")
     suspend fun clearAllConflicts()
