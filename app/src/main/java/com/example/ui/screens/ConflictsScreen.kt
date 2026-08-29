@@ -171,7 +171,7 @@ private fun ConflictCard(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text("Size: ${FormatUtils.formatBytes(conflict.localSize)}", style = MaterialTheme.typography.bodySmall)
-                        Text("Modified: ${FormatUtils.formatTimestamp(conflict.localMtime)}", style = MaterialTheme.typography.bodySmall)
+                        Text("Modified: ${FormatUtils.formatTimestampWithYear(conflict.localMtime)}", style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
@@ -189,7 +189,7 @@ private fun ConflictCard(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         Text("Size: ${FormatUtils.formatBytes(conflict.remoteSize)}", style = MaterialTheme.typography.bodySmall)
-                        Text("Modified: ${FormatUtils.formatTimestamp(conflict.remoteMtime)}", style = MaterialTheme.typography.bodySmall)
+                        Text("Modified: ${FormatUtils.formatTimestampWithYear(conflict.remoteMtime)}", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }

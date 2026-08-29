@@ -162,6 +162,9 @@ interface SyncSettingsDao {
     @Query("UPDATE sync_settings SET customLocalSyncPath = :path WHERE id = 1")
     suspend fun updateCustomLocalSyncPath(path: String)
 
+    @Query("UPDATE sync_settings SET lazyLoadSubfolders = :enabled WHERE id = 1")
+    suspend fun updateLazyLoadSubfolders(enabled: Boolean)
+
     @Query("UPDATE sync_settings SET nextScheduledSyncTimestamp = :timestamp WHERE id = 1")
     suspend fun updateNextScheduledSync(timestamp: Long)
 

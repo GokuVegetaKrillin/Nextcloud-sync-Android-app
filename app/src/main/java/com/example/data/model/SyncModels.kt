@@ -153,5 +153,6 @@ data class SyncSettingsEntity(
     val notifyOnSyncComplete: Boolean = true,
     val lastManualSyncTimestamp: Long = 0L,
     val nextScheduledSyncTimestamp: Long = 0L,
-    val customLocalSyncPath: String = "" // Custom local folder path (empty means default app storage)
+    val customLocalSyncPath: String = "", // Custom local folder path (empty means default app storage)
+    val lazyLoadSubfolders: Boolean = true // Whether to fetch subfolders on demand when expanding tree nodes (faster)
 )

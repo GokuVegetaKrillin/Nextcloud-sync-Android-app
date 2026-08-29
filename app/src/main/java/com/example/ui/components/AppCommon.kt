@@ -52,6 +52,12 @@ object FormatUtils {
         return sdf.format(Date(timestamp))
     }
 
+    fun formatTimestampWithYear(timestamp: Long): String {
+        if (timestamp <= 0) return "Never"
+        val sdf = SimpleDateFormat("MMM dd, yyyy, HH:mm", Locale.getDefault())
+        return sdf.format(Date(timestamp))
+    }
+
     fun formatScheduledTime(timestamp: Long): String {
         if (timestamp <= 0) return "Not scheduled"
         val now = System.currentTimeMillis()

@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.SyncFolderConfigEntity
+import com.example.ui.FolderRefreshStatus
 import com.example.ui.MainViewModel
 import com.example.ui.theme.*
 
@@ -210,7 +211,12 @@ fun FoldersScreen(
 ) {
     val folders by viewModel.folders.collectAsState()
     val settings by viewModel.settings.collectAsState()
+    val refreshState by viewModel.folderRefreshState.collectAsState()
+    val loadingFolderPaths by viewModel.loadingFolderPaths.collectAsState()
     val syncNewByDefault = settings?.syncNewFoldersByDefault ?: true
+    val isLazyMode = settings?.lazyLoadSubfolders ?: true
+
+    val canModifyFolders = refreshState.initialLoadCompleted && !refreshState.isRefreshing
 
     var viewMode by remember { mutableStateOf(FolderViewMode.TREE) }
     val expandedPaths = remember { mutableStateMapOf<String, Boolean>() }
@@ -234,6 +240,9 @@ fun FoldersScreen(
         fun visit(nodes: List<TreeNode>) {
             for (node in nodes) {
                 expandedPaths[node.path] = expand
+                if (expand && isLazyMode) {
+                    viewModel.fetchSubfoldersForPath(node.path)
+                }
                 visit(node.children)
             }
         }
@@ -254,6 +263,11 @@ fun FoldersScreen(
 
     // Handler for toggling selection safely with hierarchical constraints and warning
     fun handleFolderToggle(path: String, displayName: String, targetSelected: Boolean, isInherited: Boolean, parentName: String?) {
+        if (!canModifyFolders) {
+            // Blocked while folder list is downloading or not yet loaded from server
+            return
+        }
+
         if (targetSelected) {
             // Selecting is always allowed directly: selects this folder and all its subfolders
             viewModel.toggleFolderSelection(path, true)
@@ -369,7 +383,7 @@ fun FoldersScreen(
                 }
             }
 
-            // 2. Header, View Mode Switcher (Tree vs Flat) & Search
+            // 2. Header, View Mode Switcher (Tree vs Flat), Refresh Status & Search
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
@@ -402,14 +416,125 @@ fun FoldersScreen(
                             }
 
                             IconButton(
-                                onClick = { viewModel.refreshRemoteFolders() },
+                                onClick = {
+                                    if (!refreshState.isRefreshing) {
+                                        viewModel.refreshRemoteFolders()
+                                    }
+                                },
+                                enabled = !refreshState.isRefreshing,
                                 modifier = Modifier.testTag("refresh_folders_btn")
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Refresh,
-                                    contentDescription = "Scan server folders",
-                                    tint = NcPrimaryBlue
+                                if (refreshState.isRefreshing) {
+                                    CircularProgressIndicator(
+                                        color = NcPrimaryBlue,
+                                        strokeWidth = 2.dp,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Filled.Refresh,
+                                        contentDescription = "Scan server folders",
+                                        tint = NcPrimaryBlue
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Refresh Status Feedback Banner (Active, Success, or Error)
+                    if (refreshState.isRefreshing) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = NcPrimaryBlue.copy(alpha = 0.12f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, NcPrimaryBlue.copy(alpha = 0.3f)),
+                            modifier = Modifier.fillMaxWidth().testTag("refresh_status_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    color = NcPrimaryBlue,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp)
                                 )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = "Downloading folders from server...",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = NcPrimaryBlue
+                                    )
+                                    Text(
+                                        text = "Folder selection is temporarily disabled during scan",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = NcPrimaryBlue.copy(alpha = 0.8f)
+                                    )
+                                }
+                            }
+                        }
+                    } else if (refreshState.status == FolderRefreshStatus.SUCCESS) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = NcSuccessGreen.copy(alpha = 0.12f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, NcSuccessGreen.copy(alpha = 0.3f)),
+                            modifier = Modifier.fillMaxWidth().testTag("refresh_status_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CheckCircle,
+                                    contentDescription = null,
+                                    tint = NcSuccessGreen,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = refreshState.message ?: "Folder list synchronized with server",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                                    color = NcSuccessGreen
+                                )
+                            }
+                        }
+                    } else if (refreshState.status == FolderRefreshStatus.ERROR) {
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                            modifier = Modifier.fillMaxWidth().testTag("refresh_status_banner")
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.ErrorOutline,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = refreshState.message ?: "Failed to refresh folder list",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.error,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { viewModel.refreshRemoteFolders() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("Retry", style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold))
+                                }
                             }
                         }
                     }
@@ -501,12 +626,15 @@ fun FoldersScreen(
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             OutlinedButton(
                                 onClick = {
-                                    folders.forEach { folder ->
-                                        if (!folder.isSelected) {
-                                            viewModel.toggleFolderSelection(folder.remotePath, true)
+                                    if (canModifyFolders) {
+                                        folders.forEach { folder ->
+                                            if (!folder.isSelected) {
+                                                viewModel.toggleFolderSelection(folder.remotePath, true)
+                                            }
                                         }
                                     }
                                 },
+                                enabled = canModifyFolders && folders.isNotEmpty(),
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.testTag("select_all_folders_btn")
@@ -516,11 +644,14 @@ fun FoldersScreen(
 
                             OutlinedButton(
                                 onClick = {
-                                    val selectedCount = folders.count { it.isSelected }
-                                    if (selectedCount > 0) {
-                                        showDeselectAllWarning = true
+                                    if (canModifyFolders) {
+                                        val selectedCount = folders.count { it.isSelected }
+                                        if (selectedCount > 0) {
+                                            showDeselectAllWarning = true
+                                        }
                                     }
                                 },
+                                enabled = canModifyFolders && folders.isNotEmpty(),
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                                 modifier = Modifier.testTag("deselect_all_folders_btn")
@@ -546,24 +677,45 @@ fun FoldersScreen(
                                 .padding(32.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Icon(
-                                imageVector = Icons.Outlined.FolderOpen,
-                                contentDescription = "No folders",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Spacer(modifier = Modifier.height(12.dp))
-                            Text(
-                                text = "No Sync Folders Configured",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = "Tap 'Scan server folders' or tap the '+' button to discover and configure folders from your Nextcloud server.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp)
-                            )
+                            if (refreshState.isRefreshing) {
+                                CircularProgressIndicator(
+                                    color = NcPrimaryBlue,
+                                    modifier = Modifier.size(36.dp),
+                                    strokeWidth = 3.dp
+                                )
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = "Downloading Folders from Server...",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Connecting to Nextcloud and discovering directory structure. Folder selection will be ready in a moment.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Outlined.FolderOpen,
+                                    contentDescription = "No folders",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(48.dp)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+                                Text(
+                                    text = "No Sync Folders Configured",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "Tap 'Scan server folders' or tap the '+' button to discover and configure folders from your Nextcloud server.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -581,6 +733,7 @@ fun FoldersScreen(
                         folder = folder,
                         isInheritedFromParent = isInherited,
                         parentSelectedName = parentName,
+                        canModify = canModifyFolders,
                         onToggleSelection = { isSelected ->
                             handleFolderToggle(
                                 path = folder.remotePath,
@@ -616,11 +769,19 @@ fun FoldersScreen(
 
                 items(flattenedTree, key = { it.id }) { node ->
                     val isExpanded = expandedPaths[node.path] ?: false
+                    val isLoadingSubfolders = loadingFolderPaths.contains(node.path)
+
                     TreeViewNodeRow(
                         node = node,
                         isExpanded = isExpanded,
+                        isLoadingSubfolders = isLoadingSubfolders,
+                        canModify = canModifyFolders,
                         onToggleExpand = {
-                            expandedPaths[node.path] = !isExpanded
+                            val nextExpanded = !isExpanded
+                            expandedPaths[node.path] = nextExpanded
+                            if (nextExpanded && isLazyMode) {
+                                viewModel.fetchSubfoldersForPath(node.path)
+                            }
                         },
                         onToggleSelection = { isSelected ->
                             handleFolderToggle(
@@ -866,12 +1027,15 @@ fun FoldersScreen(
 
 /**
  * Tree View Node Row with indentation guides, expand/collapse chevron, folder icon,
- * parent sync lock indicator, selective descendant indicators, and add subfolder action.
+ * parent sync lock indicator, selective descendant indicators, loading spinner for subfolders,
+ * and add subfolder action.
  */
 @Composable
 private fun TreeViewNodeRow(
     node: TreeNode,
     isExpanded: Boolean,
+    isLoadingSubfolders: Boolean = false,
+    canModify: Boolean = true,
     onToggleExpand: () -> Unit,
     onToggleSelection: (Boolean) -> Unit,
     onAddSubfolder: () -> Unit
@@ -921,8 +1085,16 @@ private fun TreeViewNodeRow(
                     .padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. Expand / Collapse Chevron Button (or dot if leaf)
-                if (hasChildren) {
+                // 1. Expand / Collapse Chevron Button (or loading spinner / dot if leaf)
+                if (isLoadingSubfolders) {
+                    Box(modifier = Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(
+                            color = NcPrimaryBlue,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                } else if (hasChildren || depth == 0) {
                     IconButton(
                         onClick = onToggleExpand,
                         modifier = Modifier.size(32.dp).testTag("tree_expand_btn_${node.name}")
@@ -960,7 +1132,7 @@ private fun TreeViewNodeRow(
                             }
                         )
                         .clickable {
-                            if (hasChildren) onToggleExpand() else onToggleSelection(!isEffectivelySelected)
+                            if (hasChildren || depth == 0) onToggleExpand() else if (canModify) onToggleSelection(!isEffectivelySelected)
                         },
                     contentAlignment = Alignment.Center
                 ) {
@@ -987,7 +1159,7 @@ private fun TreeViewNodeRow(
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .clickable { onToggleSelection(!isEffectivelySelected) }
+                        .clickable { if (canModify) onToggleSelection(!isEffectivelySelected) }
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1091,7 +1263,8 @@ private fun TreeViewNodeRow(
                 // 5. Selection Checkbox
                 Checkbox(
                     checked = isEffectivelySelected,
-                    onCheckedChange = { onToggleSelection(it) },
+                    enabled = canModify,
+                    onCheckedChange = { if (canModify) onToggleSelection(it) },
                     colors = CheckboxDefaults.colors(
                         checkedColor = if (isInherited) NcPrimaryBlue.copy(alpha = 0.7f) else NcPrimaryBlue
                     ),
@@ -1107,6 +1280,7 @@ private fun FolderSyncItemCard(
     folder: SyncFolderConfigEntity,
     isInheritedFromParent: Boolean,
     parentSelectedName: String?,
+    canModify: Boolean = true,
     onToggleSelection: (Boolean) -> Unit,
     onAddSubfolder: () -> Unit
 ) {
@@ -1120,7 +1294,7 @@ private fun FolderSyncItemCard(
         elevation = CardDefaults.cardElevation(defaultElevation = if (isEffectivelySelected) 1.dp else 0.dp),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggleSelection(!isEffectivelySelected) }
+            .clickable { if (canModify) onToggleSelection(!isEffectivelySelected) }
             .testTag("folder_item_${folder.displayName}")
     ) {
         Row(
@@ -1203,7 +1377,8 @@ private fun FolderSyncItemCard(
 
                 Checkbox(
                     checked = isEffectivelySelected,
-                    onCheckedChange = { onToggleSelection(it) },
+                    enabled = canModify,
+                    onCheckedChange = { if (canModify) onToggleSelection(it) },
                     colors = CheckboxDefaults.colors(
                         checkedColor = if (isInheritedFromParent) NcPrimaryBlue.copy(alpha = 0.7f) else NcPrimaryBlue
                     ),

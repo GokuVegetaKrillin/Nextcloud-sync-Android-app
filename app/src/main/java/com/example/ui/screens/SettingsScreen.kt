@@ -1160,6 +1160,48 @@ fun SettingsScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
 
+                    // Lazy / On-Demand Subfolder Discovery Toggle
+                    val lazyLoad = settings?.lazyLoadSubfolders ?: true
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("On-Demand Subfolder Discovery", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (lazyLoad) NcSuccessGreen.copy(alpha = 0.15f) else NcWarningAmber.copy(alpha = 0.15f)
+                                ) {
+                                    Text(
+                                        text = if (lazyLoad) "Fast Loading" else "Full Discovery",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, fontWeight = FontWeight.Bold),
+                                        color = if (lazyLoad) NcSuccessGreen else NcWarningAmber,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                if (lazyLoad) "Downloads only top-level folders initially for speed, fetching subfolders dynamically when expanded."
+                                else "Recursively downloads the entire remote folder tree during refresh (may be slower on large servers).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Switch(
+                            checked = lazyLoad,
+                            onCheckedChange = { viewModel.setLazyLoadSubfolders(it) },
+                            colors = SwitchDefaults.colors(checkedTrackColor = NcPrimaryBlue),
+                            modifier = Modifier.testTag("lazy_load_subfolders_switch")
+                        )
+                    }
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+
                     // Background Sync Switch
                     val runBg = settings?.runInBackground ?: true
                     Row(
