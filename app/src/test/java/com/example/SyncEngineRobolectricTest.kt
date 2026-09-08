@@ -9,6 +9,7 @@ import com.example.data.repository.ConflictResolution
 import com.example.data.repository.NextcloudRepository
 import com.example.sync.SyncEngine
 import com.example.sync.SyncScheduler
+import com.example.util.FileTimeHelper
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
@@ -111,6 +112,9 @@ class SyncEngineRobolectricTest {
 
     @Test
     fun testSelectiveSubdirectorySyncWithoutParent() = runBlocking {
+        // Fetch subfolders of "/Documents" under lazy loading mode
+        repository.fetchSubfolders("/Documents")
+
         // Exclude parent "/Documents", but select child "/Documents/Work"
         repository.updateFolderSelection("/Documents", false)
         repository.updateFolderSelection("/Documents/Work", true)
@@ -144,6 +148,54 @@ class SyncEngineRobolectricTest {
         // Verify journal entry exists
         val journalEntry = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Client_Created_Note.txt")
         assertNotNull("Journal entry should exist after sync", journalEntry)
+    }
+
+    @Test
+    fun testConflictResolutionKeepLocal() = runBlocking {
+        // 1. Initial sync to establish baseline journal
+        syncEngine.performSynchronization(isManual = true)
+
+        val localDocsDir = File(repository.localSyncRootDir, "Documents")
+        val roadmapFile = File(localDocsDir, "Project-Roadmap.md")
+        assertTrue("Project roadmap file should exist locally", roadmapFile.exists())
+
+        // 2. Introduce conflicting changes on both server and client
+        val serverRootDir = File(context.filesDir, "mock_nextcloud_remote_storage")
+        val serverRoadmap = File(serverRootDir, "Documents/Project-Roadmap.md")
+        serverRoadmap.writeText("# Remote Server Version Content")
+        FileTimeHelper.setLastModified(serverRoadmap, System.currentTimeMillis() + 10000L)
+
+        roadmapFile.writeText("# User Local Custom Version Content")
+        FileTimeHelper.setLastModified(roadmapFile, System.currentTimeMillis() + 20000L)
+
+        // 3. Perform sync with ASK_USER strategy (default in SyncSettingsEntity)
+        syncEngine.performSynchronization(isManual = true)
+
+        // Verify conflict was recorded
+        val conflicts = repository.getUnresolvedConflicts()
+        val roadmapConflict = conflicts.find { it.remotePath == "/Documents/Project-Roadmap.md" }
+        assertNotNull("Conflict should be detected for roadmap file", roadmapConflict)
+
+        // 4. Resolve conflict by keeping local version
+        repository.resolveConflict("/Documents/Project-Roadmap.md", ConflictResolution.KEEP_LOCAL)
+
+        // 5. Verify that local file retained the local content, and server received local content
+        assertTrue("Local file must exist", roadmapFile.exists())
+        assertEquals(
+            "Local file must contain user local content, not server content",
+            "# User Local Custom Version Content",
+            roadmapFile.readText()
+        )
+
+        assertEquals(
+            "Server file must have been overwritten with user local content",
+            "# User Local Custom Version Content",
+            serverRoadmap.readText()
+        )
+
+        // Verify conflict is resolved
+        val remainingConflicts = repository.getUnresolvedConflicts()
+        assertTrue("Conflict should now be marked resolved", remainingConflicts.none { it.remotePath == "/Documents/Project-Roadmap.md" })
     }
 }
 

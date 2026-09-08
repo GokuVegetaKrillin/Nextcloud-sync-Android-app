@@ -552,20 +552,33 @@ class NextcloudRepository(private val context: Context) {
 
         when (resolution) {
             ConflictResolution.KEEP_LOCAL -> {
-                // If localFile was previously renamed to conflict copy in ASK_USER, restore it
-                if (!localFile.exists() && conflict.conflictLocalFileName.isNotEmpty()) {
+                // Restore the user's local version from the conflicted copy created during ASK_USER conflict detection
+                if (conflict.conflictLocalFileName.isNotEmpty()) {
                     val conflictCopy = File(localFile.parentFile, conflict.conflictLocalFileName)
                     if (conflictCopy.exists()) {
-                        conflictCopy.renameTo(localFile)
+                        // localFile currently holds the downloaded server file; replace it with the user's local copy
+                        if (localFile.exists()) {
+                            localFile.delete()
+                        }
+                        val renamed = conflictCopy.renameTo(localFile)
+                        if (!renamed) {
+                            conflictCopy.copyTo(localFile, overwrite = true)
+                            conflictCopy.delete()
+                        }
                     }
                 }
 
-                // Upload local to remote, overwrite remote
-                var newEtag = conflict.remoteEtag
+                // Restore original local file modification timestamp if preserved
+                if (localFile.exists() && conflict.localMtime > 0L) {
+                    FileTimeHelper.setLastModified(localFile, conflict.localMtime)
+                }
+
+                // Upload local to remote, overwriting remote with the user's local version
+                var newEtag = cleanEtag(conflict.remoteEtag)
                 if (localFile.exists()) {
-                    newEtag = if (account.isSimulatedDemo) {
-                        mockServer.uploadFile(conflict.remotePath, localFile, localFile.lastModified()).getOrNull()
-                            ?: "etag_${System.currentTimeMillis()}"
+                    val mtimeToUpload = localFile.lastModified()
+                    val uploadResult = if (account.isSimulatedDemo) {
+                        mockServer.uploadFile(conflict.remotePath, localFile, mtimeToUpload).getOrNull()
                     } else {
                         nextcloudClient.uploadFile(
                             account.serverUrl,
@@ -573,10 +586,11 @@ class NextcloudRepository(private val context: Context) {
                             account.passwordOrToken,
                             conflict.remotePath,
                             localFile,
-                            localFile.lastModified(),
+                            mtimeToUpload,
                             account.trustAllCerts
-                        ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                        ).getOrNull()
                     }
+                    newEtag = cleanEtag(uploadResult).ifBlank { "etag_${System.currentTimeMillis()}" }
                 }
 
                 // Record in sync journal so subsequent sync cycles know local & remote match perfectly
@@ -585,7 +599,7 @@ class NextcloudRepository(private val context: Context) {
                         remotePath = conflict.remotePath,
                         localRelativePath = conflict.localRelativePath,
                         isDirectory = false,
-                        remoteEtag = newEtag,
+                        remoteEtag = cleanEtag(newEtag),
                         remoteSize = localFile.length(),
                         remoteMtime = localFile.lastModified(),
                         localSize = localFile.length(),
@@ -594,7 +608,7 @@ class NextcloudRepository(private val context: Context) {
                     )
                 )
 
-                // Clean up conflict copy if present
+                // Clean up conflict copy if still present
                 if (conflict.conflictLocalFileName.isNotEmpty()) {
                     val conflictCopy = File(localFile.parentFile, conflict.conflictLocalFileName)
                     if (conflictCopy.exists()) conflictCopy.delete()
@@ -632,7 +646,7 @@ class NextcloudRepository(private val context: Context) {
                         remotePath = conflict.remotePath,
                         localRelativePath = conflict.localRelativePath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(etag),
                         remoteSize = localFile.length(),
                         remoteMtime = conflict.remoteMtime,
                         localSize = localFile.length(),
@@ -694,7 +708,7 @@ class NextcloudRepository(private val context: Context) {
                         remotePath = conflict.remotePath,
                         localRelativePath = conflict.localRelativePath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(etag),
                         remoteSize = localFile.length(),
                         remoteMtime = conflict.remoteMtime,
                         localSize = localFile.length(),
@@ -748,6 +762,15 @@ class NextcloudRepository(private val context: Context) {
 
     fun deleteLocalFile(file: File): Boolean {
         return file.deleteRecursively()
+    }
+
+    private fun cleanEtag(etag: String?): String {
+        if (etag.isNullOrBlank()) return ""
+        return etag.trim()
+            .removePrefix("W/")
+            .removePrefix("w/")
+            .removeSurrounding("\"")
+            .trim()
     }
 }
 
