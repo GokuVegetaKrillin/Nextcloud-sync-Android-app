@@ -213,7 +213,14 @@ class MockNextcloudServer(private val context: Context) {
         }
     }
 
+    var shouldFailDelete: Boolean = false
+    var deleteErrorMessage: String? = null
+
     suspend fun deleteItem(remotePath: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        if (shouldFailDelete) {
+            val errorMsg = deleteErrorMessage ?: "HTTP 500 Internal Server Error: Nextcloud storage lock error on DELETE '$remotePath'"
+            return@withContext Result.failure(java.io.IOException(errorMsg))
+        }
         try {
             val cleanPath = remotePath.trim().removePrefix("/")
             val target = File(serverRootDir, cleanPath)

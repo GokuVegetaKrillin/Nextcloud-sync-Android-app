@@ -248,6 +248,103 @@ class SyncEngineRobolectricTest {
         val journalRecreated = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Project-Roadmap.md")
         assertNotNull("Journal entry must be recreated for the new file", journalRecreated)
     }
+
+    @Test
+    fun testDeleteFailurePreservesJournalAndLogsDetailedError() = runBlocking {
+        // 1. Add a test file on mock server and perform initial sync
+        repository.mockServer.addRemoteFile("/Documents/test-delete.txt", "Test content for deletion failure test")
+        syncEngine.performSynchronization(isManual = true)
+
+        val localDocsDir = File(repository.localSyncRootDir, "Documents")
+        val testFile = File(localDocsDir, "test-delete.txt")
+        assertTrue("test-delete.txt should exist locally after initial sync", testFile.exists())
+
+        val journalBefore = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/test-delete.txt")
+        assertNotNull("Journal entry should exist", journalBefore)
+
+        // 2. Delete locally
+        assertTrue(testFile.delete())
+        assertFalse(testFile.exists())
+
+        // 3. Simulate server delete failure (e.g. 500 error or permission denied)
+        repository.mockServer.shouldFailDelete = true
+        repository.mockServer.deleteErrorMessage = "HTTP 423 Locked: Resource locked by Nextcloud server"
+
+        // 4. Run sync
+        syncEngine.performSynchronization(isManual = true)
+
+        // 5. Verify journal was NOT deleted
+        val journalAfterFailure = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/test-delete.txt")
+        assertNotNull("Journal entry MUST be preserved when server deletion fails", journalAfterFailure)
+
+        // 6. Verify detailed error was logged to activity screen
+        val activities = repository.databaseInstance().syncActivityDao().getAllActivities()
+        val errorActivity = activities.find {
+            it.type == ActivityType.ERROR && it.path == "/Documents/test-delete.txt"
+        }
+        assertNotNull("ActivityType.ERROR must be logged when delete fails", errorActivity)
+        assertTrue("Error message must contain detailed error reason",
+            errorActivity?.message?.contains("HTTP 423 Locked") == true ||
+            errorActivity?.message?.contains("Resource locked") == true
+        )
+
+        // 7. Verify local file was NOT re-downloaded
+        assertFalse("Local file must not be re-downloaded even if server delete failed", testFile.exists())
+
+        // 8. Now resolve server error, sync again, and verify deletion succeeds and journal is removed
+        repository.mockServer.shouldFailDelete = false
+        syncEngine.performSynchronization(isManual = true)
+
+        val journalAfterSuccess = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/test-delete.txt")
+        assertNull("Journal entry should be removed after server deletion succeeds", journalAfterSuccess)
+    }
+
+    @Test
+    fun testUnselectedFoldersNotCreatedLocallyOnServerAddressChange() = runBlocking {
+        // 1. Change server address to new server
+        val newUrl = "https://newcloud.example.org"
+        repository.updateServerAddress(newUrl)
+
+        // 2. Refresh remote folders and select ONLY /Documents; unselect /Photos and /Projects
+        repository.refreshRemoteFolders()
+        repository.updateFolderSelection("/Documents", true)
+        repository.updateFolderSelection("/Photos", false)
+        repository.updateFolderSelection("/Projects", false)
+
+        // 3. Perform synchronization
+        syncEngine.performSynchronization(isManual = true)
+
+        // 4. Verify that unselected folders (/Photos, /Projects) were NOT created locally
+        val localSyncRoot = repository.localSyncRootDir
+        val localPhotosDir = File(localSyncRoot, "Photos")
+        val localProjectsDir = File(localSyncRoot, "Projects")
+        val localDocsDir = File(localSyncRoot, "Documents")
+
+        assertTrue("Selected folder /Documents MUST exist locally", localDocsDir.exists())
+        assertFalse("Unselected folder /Photos must NOT be created locally", localPhotosDir.exists())
+        assertFalse("Unselected folder /Projects must NOT be created locally", localProjectsDir.exists())
+
+        // 5. Verify that no journal entries exist for unselected folders
+        val allJournal = repository.databaseInstance().syncJournalDao().getAllJournalEntries()
+        val photosJournal = allJournal.filter { it.remotePath.startsWith("/Photos") }
+        val projectsJournal = allJournal.filter { it.remotePath.startsWith("/Projects") }
+        assertTrue("No journal entries for unselected /Photos", photosJournal.isEmpty())
+        assertTrue("No journal entries for unselected /Projects", projectsJournal.isEmpty())
+
+        // 6. Now simulate selecting /Photos in the future:
+        // Server has files in /Photos, and they must be downloaded without being deleted from server!
+        repository.updateFolderSelection("/Photos", true)
+        syncEngine.performSynchronization(isManual = true)
+
+        assertTrue("Now selected /Photos must exist locally", localPhotosDir.exists())
+        val localPhotosFiles = localPhotosDir.listFiles() ?: emptyArray()
+        assertTrue("Photos files should be downloaded cleanly from server", localPhotosFiles.isNotEmpty())
+
+        val serverRootDir = File(context.filesDir, "mock_nextcloud_remote_storage")
+        val serverPhotosDir = File(serverRootDir, "Photos")
+        val serverPhotosFiles = serverPhotosDir.listFiles() ?: emptyArray()
+        assertTrue("Server photos must still exist on server and not be deleted", serverPhotosFiles.isNotEmpty())
+    }
 }
 
 private fun NextcloudRepository.databaseInstance(): com.example.data.local.AppDatabase {

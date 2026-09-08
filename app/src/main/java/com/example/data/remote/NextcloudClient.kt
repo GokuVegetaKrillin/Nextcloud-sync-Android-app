@@ -463,7 +463,13 @@ class NextcloudClient {
             if (response.code in 200..204 || response.code == 404) {
                 Result.success(true)
             } else {
-                Result.failure(IOException("DELETE failed HTTP ${response.code}: ${response.message}"))
+                val errorBody = try {
+                    response.body?.string()?.take(200)?.trim()
+                } catch (_: Exception) {
+                    null
+                }
+                val detailStr = if (!errorBody.isNullOrBlank()) " - Response: $errorBody" else ""
+                Result.failure(IOException("HTTP ${response.code} (${response.message})$detailStr [Target: $targetUrl]"))
             }
         } catch (e: Exception) {
             Result.failure(e)

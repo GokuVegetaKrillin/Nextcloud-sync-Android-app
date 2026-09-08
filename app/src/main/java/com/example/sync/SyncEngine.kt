@@ -190,11 +190,19 @@ class SyncEngine(
             _syncState.value = _syncState.value.copy(currentAction = "Indexing Nextcloud remote files...")
             val allRemoteItemsMap = mutableMapOf<String, WebDavItem>()
 
-            // Add root-level files and folders
+            // Add root-level files and enabled root-level folders only
             for (item in rootRemoteItems) {
                 if (item.path.isNotEmpty() && item.path != "/") {
                     if (settings.ignoreDotFilesAndFolders && item.displayName.startsWith(".")) continue
-                    allRemoteItemsMap[item.path] = item
+                    if (item.isDirectory) {
+                        // Crucial: Only index root directory if it is enabled for synchronization!
+                        if (enabledFolders.any { it.remotePath == item.path }) {
+                            allRemoteItemsMap[item.path] = item
+                        }
+                    } else {
+                        // Genuine root-level file (e.g. /Readme.md)
+                        allRemoteItemsMap[item.path] = item
+                    }
                 }
             }
 
@@ -260,13 +268,36 @@ class SyncEngine(
             allPaths.addAll(localFilesMap.keys)
             allPaths.addAll(journalMap.keys)
 
-            // Filter paths belonging to enabled folders (or subdirectories) or root level files
+            // Filter paths belonging to enabled folders (or subdirectories) or genuine root level files
+            // Folders that are not selected for synchronization must NEVER be created or processed!
             val targetPaths = allPaths.filter { path ->
-                val isRootFile = !path.removePrefix("/").contains("/")
-                val belongsToSelected = enabledFolders.any { folder ->
-                    path == folder.remotePath || path.startsWith("${folder.remotePath}/")
+                // 1. Strictly exclude any path belonging to or inside an unselected folder
+                val belongsToUnselected = unselectedFolders.any { unselected ->
+                    path == unselected.remotePath || path.startsWith("${unselected.remotePath}/")
                 }
-                isRootFile || belongsToSelected
+                if (belongsToUnselected) {
+                    return@filter false
+                }
+
+                // 2. Identify if this path represents a folder
+                val isDirectory = allRemoteItemsMap[path]?.isDirectory == true ||
+                    localFilesMap[path]?.isDirectory == true ||
+                    journalMap[path]?.isDirectory == true ||
+                    currentFolders.any { it.remotePath == path }
+
+                if (isDirectory) {
+                    // Folders must explicitly be selected or be inside an enabled folder
+                    enabledFolders.any { folder ->
+                        path == folder.remotePath || path.startsWith("${folder.remotePath}/")
+                    }
+                } else {
+                    // Files: must either belong to an enabled folder or be a genuine root-level file (e.g. /notes.txt)
+                    val belongsToSelected = enabledFolders.any { folder ->
+                        path.startsWith("${folder.remotePath}/")
+                    }
+                    val isRootFile = !path.removePrefix("/").contains("/") && currentFolders.none { it.remotePath == path }
+                    isRootFile || belongsToSelected
+                }
             }.sortedWith(compareBy({ !it.contains("/") }, { it.count { c -> c == '/' } }, { it }))
 
             if (targetPaths.isEmpty() && enabledFolders.isEmpty()) {
@@ -479,7 +510,7 @@ class SyncEngine(
 
                             if (shouldDeleteOnServer) {
                                 _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
-                                if (account.isSimulatedDemo) {
+                                val deleteResult = if (account.isSimulatedDemo) {
                                     repository.mockServer.deleteItem(path)
                                 } else {
                                     repository.nextcloudClient.deleteItem(
@@ -490,21 +521,31 @@ class SyncEngine(
                                         account.trustAllCerts
                                     )
                                 }
-                                journalDao.deleteByRemotePath(path)
-                                if (remote.isDirectory) {
-                                    locallyDeletedDirsInThisRun.add(path)
-                                    journalDao.deleteByPathPrefix(path)
+
+                                if (deleteResult.isSuccess) {
+                                    journalDao.deleteByRemotePath(path)
+                                    if (remote.isDirectory) {
+                                        locallyDeletedDirsInThisRun.add(path)
+                                        journalDao.deleteByPathPrefix(path)
+                                    }
+                                    repository.logActivity(
+                                        ActivityType.DELETE_LOCAL,
+                                        path,
+                                        "Detected local deletion of ${if (remote.isDirectory) "folder" else "file"} '$path'"
+                                    )
+                                    repository.logActivity(
+                                        ActivityType.DELETE_REMOTE,
+                                        path,
+                                        "Deleted ${if (remote.isDirectory) "folder" else "file"} from Nextcloud (deleted locally): '$path'"
+                                    )
+                                } else {
+                                    val errorDetail = deleteResult.exceptionOrNull()?.message ?: "Server rejected deletion"
+                                    repository.logActivity(
+                                        ActivityType.ERROR,
+                                        path,
+                                        "Failed to delete ${if (remote.isDirectory) "folder" else "file"} '$path' from Nextcloud: $errorDetail. Journal entry preserved to retry on next sync."
+                                    )
                                 }
-                                repository.logActivity(
-                                    ActivityType.DELETE_LOCAL,
-                                    path,
-                                    "Detected local deletion of ${if (remote.isDirectory) "folder" else "file"} '$path'"
-                                )
-                                repository.logActivity(
-                                    ActivityType.DELETE_REMOTE,
-                                    path,
-                                    "Deleted ${if (remote.isDirectory) "folder" else "file"} from Nextcloud (deleted locally): '$path'"
-                                )
                             } else {
                                 // Safeguard download if remote was modified on server and server wins
                                 if (remote.isDirectory) {
@@ -974,7 +1015,13 @@ class SyncEngine(
             if (isTempOrIgnoredFile(file, ignoreDotFiles)) continue
             if (file.isDirectory) {
                 val remotePath = "/${file.name}"
-                scanRecursive(file, remotePath, map, ignoreDotFiles)
+                // Only scan local folder if it is selected for sync or contains selected folders
+                val isFolderEnabledOrAncestor = enabledFolders.any {
+                    it.remotePath == remotePath || it.remotePath.startsWith("$remotePath/") || remotePath.startsWith("${it.remotePath}/")
+                }
+                if (isFolderEnabledOrAncestor) {
+                    scanRecursive(file, remotePath, map, ignoreDotFiles, enabledFolders)
+                }
             } else {
                 map["/${file.name}"] = file
             }
@@ -982,14 +1029,25 @@ class SyncEngine(
         return map
     }
 
-    private fun scanRecursive(dir: File, currentRemotePath: String, outMap: MutableMap<String, File>, ignoreDotFiles: Boolean) {
+    private fun scanRecursive(
+        dir: File,
+        currentRemotePath: String,
+        outMap: MutableMap<String, File>,
+        ignoreDotFiles: Boolean,
+        enabledFolders: List<SyncFolderConfigEntity>
+    ) {
+        val isEnabled = enabledFolders.any {
+            it.remotePath == currentRemotePath || it.remotePath.startsWith("$currentRemotePath/") || currentRemotePath.startsWith("${it.remotePath}/")
+        }
+        if (!isEnabled) return
+
         outMap[currentRemotePath] = dir
         val children = dir.listFiles() ?: return
         for (child in children) {
             if (isTempOrIgnoredFile(child, ignoreDotFiles)) continue
             val childRemotePath = "$currentRemotePath/${child.name}"
             if (child.isDirectory) {
-                scanRecursive(child, childRemotePath, outMap, ignoreDotFiles)
+                scanRecursive(child, childRemotePath, outMap, ignoreDotFiles, enabledFolders)
             } else {
                 outMap[childRemotePath] = child
             }

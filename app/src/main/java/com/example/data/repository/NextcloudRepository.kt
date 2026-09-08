@@ -142,6 +142,16 @@ class NextcloudRepository(private val context: Context) {
     }
 
     suspend fun saveAccount(account: AccountEntity) = withContext(Dispatchers.IO) {
+        val current = accountDao.getAccount()
+        val serverChanged = current != null && (
+            current.serverUrl.trimEnd('/') != account.serverUrl.trimEnd('/') ||
+            current.username != account.username
+        )
+        if (serverChanged) {
+            folderDao.deleteAllFolders()
+            journalDao.clearJournal()
+            conflictDao.clearAllConflicts()
+        }
         accountDao.insertOrUpdateAccount(account)
         logActivity(
             type = ActivityType.INFO,
@@ -153,6 +163,7 @@ class NextcloudRepository(private val context: Context) {
     suspend fun updateServerAddress(newServerUrl: String): ServerStatus = withContext(Dispatchers.IO) {
         val sanitized = nextcloudClient.sanitizeServerUrl(newServerUrl)
         val currentAccount = accountDao.getAccount()
+        val serverChanged = currentAccount != null && currentAccount.serverUrl.trimEnd('/') != sanitized.trimEnd('/')
 
         // Probe status
         val status = if (currentAccount?.isSimulatedDemo == true && !newServerUrl.contains("://") && !newServerUrl.contains(".")) {
@@ -163,6 +174,11 @@ class NextcloudRepository(private val context: Context) {
 
         // Update database
         accountDao.updateServerUrl(sanitized)
+        if (serverChanged) {
+            folderDao.deleteAllFolders()
+            journalDao.clearJournal()
+            conflictDao.clearAllConflicts()
+        }
         logActivity(
             type = ActivityType.INFO,
             path = sanitized,
