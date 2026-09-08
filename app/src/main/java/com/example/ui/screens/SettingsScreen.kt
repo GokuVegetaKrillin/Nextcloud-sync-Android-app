@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -103,7 +107,55 @@ fun SettingsScreen(
     var exportedJsonText by remember { mutableStateOf("") }
     var importJsonInput by remember { mutableStateOf("") }
     var importErrorMessage by remember { mutableStateOf<String?>(null) }
+    var exportFileMessage by remember { mutableStateOf<String?>(null) }
+    var importFileMessage by remember { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
+
+    // Activity launcher to export settings directly to a user-selected JSON file
+    val exportJsonFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            coroutineScope.launch {
+                try {
+                    val json = viewModel.exportSettingsJson()
+                    context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        outputStream.write(json.toByteArray(Charsets.UTF_8))
+                    }
+                    exportFileMessage = "Settings successfully saved to selected JSON file!"
+                    importErrorMessage = null
+                    Toast.makeText(context, "Settings exported successfully", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    exportFileMessage = "Failed to save JSON file: ${e.localizedMessage}"
+                }
+            }
+        }
+    }
+
+    // Activity launcher to import settings directly from a user-selected JSON file
+    val importJsonFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            coroutineScope.launch {
+                try {
+                    val json = context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                        inputStream.bufferedReader(Charsets.UTF_8).readText()
+                    } ?: ""
+                    val result = viewModel.importSettingsJson(json)
+                    if (result.isSuccess) {
+                        importFileMessage = "Configuration imported and restored successfully!"
+                        importErrorMessage = null
+                        Toast.makeText(context, "Settings restored successfully", Toast.LENGTH_SHORT).show()
+                    } else {
+                        importErrorMessage = result.exceptionOrNull()?.message ?: "Invalid JSON file structure"
+                    }
+                } catch (e: Exception) {
+                    importErrorMessage = "Failed to read file: ${e.localizedMessage}"
+                }
+            }
+        }
+    }
 
     // Effective active directory
     val effectivePath = remember(settings?.customLocalSyncPath) {
@@ -1339,10 +1391,8 @@ fun SettingsScreen(
                     ) {
                         OutlinedButton(
                             onClick = {
-                                coroutineScope.launch {
-                                    exportedJsonText = viewModel.exportSettingsJson()
-                                    showExportDialog = true
-                                }
+                                exportFileMessage = null
+                                exportJsonFileLauncher.launch("nextcloud_sync_settings.json")
                             },
                             shape = RoundedCornerShape(8.dp),
                             modifier = Modifier.weight(1f).testTag("export_settings_btn")
@@ -1354,9 +1404,9 @@ fun SettingsScreen(
 
                         Button(
                             onClick = {
-                                importJsonInput = ""
+                                importFileMessage = null
                                 importErrorMessage = null
-                                showImportDialog = true
+                                importJsonFileLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = NcPrimaryBlue),
                             shape = RoundedCornerShape(8.dp),
@@ -1366,6 +1416,64 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Import JSON")
                         }
+                    }
+
+                    exportFileMessage?.let { msg ->
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = NcSuccessGreen.copy(alpha = 0.12f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = NcSuccessGreen, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+
+                    importFileMessage?.let { msg ->
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = NcSuccessGreen.copy(alpha = 0.12f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = NcSuccessGreen, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+
+                    importErrorMessage?.let { err ->
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Filled.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(6.dp))
+                    TextButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                exportedJsonText = viewModel.exportSettingsJson()
+                                showExportDialog = true
+                            }
+                        },
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text("View / Copy Raw JSON", style = MaterialTheme.typography.labelMedium, color = NcPrimaryBlue)
                     }
                 }
             }

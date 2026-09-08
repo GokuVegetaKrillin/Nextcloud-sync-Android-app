@@ -609,7 +609,7 @@ class NextcloudRepository(private val context: Context) {
             ConflictResolution.KEEP_REMOTE -> {
                 // Download remote and overwrite local
                 val etag = if (account.isSimulatedDemo) {
-                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull() ?: conflict.remoteEtag
+                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull()?.ifBlank { null } ?: conflict.remoteEtag
                 } else {
                     nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -618,7 +618,7 @@ class NextcloudRepository(private val context: Context) {
                         conflict.remotePath,
                         localFile,
                         account.trustAllCerts
-                    ).getOrNull() ?: conflict.remoteEtag
+                    ).getOrNull()?.ifBlank { null } ?: conflict.remoteEtag
                 }
 
                 // CRITICAL: Synchronize local file modification timestamp to match server timestamp
@@ -671,7 +671,7 @@ class NextcloudRepository(private val context: Context) {
 
                 // Download original remote
                 val etag = if (account.isSimulatedDemo) {
-                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull() ?: conflict.remoteEtag
+                    mockServer.downloadFile(conflict.remotePath, localFile).getOrNull()?.ifBlank { null } ?: conflict.remoteEtag
                 } else {
                     nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -680,7 +680,7 @@ class NextcloudRepository(private val context: Context) {
                         conflict.remotePath,
                         localFile,
                         account.trustAllCerts
-                    ).getOrNull() ?: conflict.remoteEtag
+                    ).getOrNull()?.ifBlank { null } ?: conflict.remoteEtag
                 }
 
                 // Synchronize local file modification timestamp to match server timestamp

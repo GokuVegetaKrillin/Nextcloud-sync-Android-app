@@ -290,9 +290,8 @@ class NextcloudClient {
                 return@withContext Result.failure(IOException("Download failed HTTP ${response.code}: ${response.message}"))
             }
 
-            val etag = response.header("ETag")?.removeSurrounding("\"")
-                ?: response.header("OC-ETag")?.removeSurrounding("\"")
-                ?: ""
+            val rawEtag = response.header("ETag") ?: response.header("OC-ETag")
+            val etag = rawEtag?.trim()?.removePrefix("W/")?.removePrefix("w/")?.removeSurrounding("\"")?.trim() ?: ""
             val totalBytes = response.body?.contentLength() ?: -1L
             val stallTimeoutMs = (stallTimeoutSeconds.coerceAtLeast(15L)) * 1000L
             var lastProgressTime = System.currentTimeMillis()
@@ -397,8 +396,8 @@ class NextcloudClient {
             val response = getClient(trustAll).newCall(request).execute()
             val code = response.code
             if (code in 200..299) {
-                val etag = response.header("ETag")?.removeSurrounding("\"")
-                    ?: response.header("OC-ETag")?.removeSurrounding("\"")
+                val rawEtag = response.header("ETag") ?: response.header("OC-ETag")
+                val etag = rawEtag?.trim()?.removePrefix("W/")?.removePrefix("w/")?.removeSurrounding("\"")?.trim()?.ifBlank { null }
                     ?: "etag_${System.currentTimeMillis()}"
                 Result.success(etag)
             } else {

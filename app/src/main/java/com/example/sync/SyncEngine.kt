@@ -266,6 +266,7 @@ class SyncEngine(
             )
 
             val newlyCreatedLocalDirsInThisRun = mutableSetOf<String>()
+            val locallyDeletedDirsInThisRun = mutableSetOf<String>()
 
             // 8. Reconcile each path
             for (path in targetPaths) {
@@ -294,7 +295,7 @@ class SyncEngine(
                                     remotePath = path,
                                     localRelativePath = relativeLocalPath,
                                     isDirectory = true,
-                                    remoteEtag = remote.etag,
+                                    remoteEtag = cleanEtag(remote.etag),
                                     remoteSize = 0L,
                                     remoteMtime = remote.lastModified,
                                     localSize = 0L,
@@ -305,7 +306,15 @@ class SyncEngine(
                         } else {
                             // File exists on both sides
                             val localModified = journal != null && (local.length() != journal.localSize || Math.abs(local.lastModified() - journal.localMtime) > 2000)
-                            val remoteModified = journal != null && (remote.etag != journal.remoteEtag)
+                            val remoteCleanEtag = cleanEtag(remote.etag)
+                            val journalCleanEtag = cleanEtag(journal?.remoteEtag)
+                            val remoteModified = journal != null && (
+                                if (remoteCleanEtag.isNotEmpty() && journalCleanEtag.isNotEmpty()) {
+                                    remoteCleanEtag != journalCleanEtag
+                                } else {
+                                    remote.size != journal.remoteSize || Math.abs(remote.lastModified - journal.remoteMtime) > 2000L
+                                }
+                            )
 
                             if (journal == null) {
                                 // File exists on both sides but never synced before
@@ -316,7 +325,7 @@ class SyncEngine(
                                             remotePath = path,
                                             localRelativePath = relativeLocalPath,
                                             isDirectory = false,
-                                            remoteEtag = remote.etag,
+                                            remoteEtag = cleanEtag(remote.etag),
                                             remoteSize = remote.size,
                                             remoteMtime = remote.lastModified,
                                             localSize = local.length(),
@@ -349,7 +358,7 @@ class SyncEngine(
                                 // Upload local modification
                                 _syncState.value = _syncState.value.copy(currentAction = "Uploading ${targetLocalFile.name}")
                                 val etag = if (account.isSimulatedDemo) {
-                                    repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                    repository.mockServer.uploadFile(path, local, local.lastModified()).getOrNull()?.ifBlank { null } ?: "etag_${System.currentTimeMillis()}"
                                 } else {
                                     repository.nextcloudClient.uploadFile(
                                         account.serverUrl,
@@ -360,7 +369,7 @@ class SyncEngine(
                                         local.lastModified(),
                                         account.trustAllCerts,
                                         stallTimeout
-                                    ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                                    ).getOrNull()?.ifBlank { null } ?: "etag_${System.currentTimeMillis()}"
                                 }
                                 bytesTransferred += local.length()
                                 journalDao.insertOrUpdate(
@@ -368,7 +377,7 @@ class SyncEngine(
                                         remotePath = path,
                                         localRelativePath = relativeLocalPath,
                                         isDirectory = false,
-                                        remoteEtag = etag,
+                                        remoteEtag = cleanEtag(etag),
                                         remoteSize = local.length(),
                                         remoteMtime = local.lastModified(),
                                         localSize = local.length(),
@@ -380,8 +389,8 @@ class SyncEngine(
                             } else if (remoteModified) {
                                 // Download remote modification
                                 _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
-                                val etag = if (account.isSimulatedDemo) {
-                                    repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
+                                val downloadedEtag = if (account.isSimulatedDemo) {
+                                    repository.mockServer.downloadFile(path, targetLocalFile).getOrNull()?.ifBlank { null } ?: remote.etag
                                 } else {
                                     repository.nextcloudClient.downloadFile(
                                         account.serverUrl,
@@ -391,7 +400,7 @@ class SyncEngine(
                                         targetLocalFile,
                                         account.trustAllCerts,
                                         stallTimeout
-                                    ).getOrNull() ?: remote.etag
+                                    ).getOrNull()?.ifBlank { null } ?: remote.etag
                                 }
                                 if (remote.lastModified > 0L) {
                                     FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
@@ -402,7 +411,7 @@ class SyncEngine(
                                         remotePath = path,
                                         localRelativePath = relativeLocalPath,
                                         isDirectory = false,
-                                        remoteEtag = etag,
+                                        remoteEtag = cleanEtag(downloadedEtag).ifBlank { cleanEtag(remote.etag) },
                                         remoteSize = targetLocalFile.length(),
                                         remoteMtime = remote.lastModified,
                                         localSize = targetLocalFile.length(),
@@ -418,90 +427,118 @@ class SyncEngine(
                         val parentDir = targetLocalFile.parentFile
                         val parentRelativePath = "/" + (parentDir?.relativeTo(localBaseDir)?.path?.replace('\\', '/') ?: "").trim('/')
                         
-                        // Local deletion confirmed ONLY if:
-                        // 1. Parent folder existed in local filesystem at start of this sync
-                        // 2. Not located within a folder newly created during this sync run
-                        // 3. Remote etag exactly matches previous journal etag
-                        val parentExistedAtStart = parentDir != null && parentDir.exists() && (parentRelativePath == "/" || localFilesMap.containsKey(parentRelativePath))
-                        val isInsideNewlyCreatedDir = newlyCreatedLocalDirsInThisRun.any { dirPath ->
-                            path == dirPath || path.startsWith("$dirPath/")
+                        // Check if an ancestor directory was already confirmed deleted in this sync run
+                        val isAncestorLocallyDeleted = locallyDeletedDirsInThisRun.any { dirPath ->
+                            path.startsWith("$dirPath/")
                         }
-                        val isConfirmedLocalDeletion = journal != null && parentExistedAtStart && !isInsideNewlyCreatedDir && (remote.etag == journal.remoteEtag)
 
-                        if (isConfirmedLocalDeletion) {
-                            // Local deletion confirmed and remote was not modified in the meantime
-                            _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
-                            if (account.isSimulatedDemo) {
-                                repository.mockServer.deleteItem(path)
-                            } else {
-                                repository.nextcloudClient.deleteItem(
-                                    account.serverUrl,
-                                    account.username,
-                                    account.passwordOrToken,
-                                    path,
-                                    account.trustAllCerts
-                                )
-                            }
+                        if (isAncestorLocallyDeleted) {
+                            // Ancestor folder was already deleted on Nextcloud in this run
+                            // Clean up journal entry for this child without redundant re-download or deletion request
                             journalDao.deleteByRemotePath(path)
-                            repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
                         } else {
-                            // Download remote item to local (new remote file or re-selected folder protection)
-                            if (remote.isDirectory) {
-                                targetLocalFile.mkdirs()
-                                newlyCreatedLocalDirsInThisRun.add(path)
-                                journalDao.insertOrUpdate(
-                                    SyncJournalEntryEntity(
-                                        remotePath = path,
-                                        localRelativePath = relativeLocalPath,
-                                        isDirectory = true,
-                                        remoteEtag = remote.etag,
-                                        remoteSize = 0L,
-                                        remoteMtime = remote.lastModified,
-                                        localSize = 0L,
-                                        localMtime = targetLocalFile.lastModified(),
-                                        fileId = remote.fileId ?: ""
-                                    )
-                                )
-                                repository.logActivity(ActivityType.CREATE_DIR_LOCAL, path, "Created local folder for '${remote.displayName}'")
-                            } else {
-                                _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
-                                val etag = if (account.isSimulatedDemo) {
-                                    repository.mockServer.downloadFile(path, targetLocalFile).getOrNull() ?: remote.etag
+                            val parentExistedLocally = parentDir != null && parentDir.exists() && (parentRelativePath == "/" || localFilesMap.containsKey(parentRelativePath))
+                            val isInsideNewlyCreatedDir = newlyCreatedLocalDirsInThisRun.any { dirPath ->
+                                path == dirPath || path.startsWith("$dirPath/")
+                            }
+
+                            val remoteCleanEtag = cleanEtag(remote.etag)
+                            val journalCleanEtag = cleanEtag(journal?.remoteEtag)
+                            val etagsMatch = remoteCleanEtag.isNotEmpty() && remoteCleanEtag == journalCleanEtag
+                            val mtimeAndSizeMatch = journal != null &&
+                                remote.size == journal.remoteSize &&
+                                Math.abs(remote.lastModified - journal.remoteMtime) <= 2000L
+
+                            val remoteUnchangedSinceLastSync = etagsMatch || mtimeAndSizeMatch
+
+                            // Safe local deletion verification:
+                            // 1. Must have a previous journal entry (proves it was previously synced and downloaded, not a new server file)
+                            // 2. Parent directory must exist locally (ensures local storage is mounted and present)
+                            // 3. Not inside a directory created in this run
+                            // 4. Remote file was NOT modified on the server since last sync (safeguards against deleting remote changes made by other clients)
+                            val isConfirmedLocalDeletion = journal != null &&
+                                parentExistedLocally &&
+                                !isInsideNewlyCreatedDir &&
+                                remoteUnchangedSinceLastSync
+
+                            if (isConfirmedLocalDeletion) {
+                                _syncState.value = _syncState.value.copy(currentAction = "Propagating deletion to Nextcloud...")
+                                if (account.isSimulatedDemo) {
+                                    repository.mockServer.deleteItem(path)
                                 } else {
-                                    repository.nextcloudClient.downloadFile(
+                                    repository.nextcloudClient.deleteItem(
                                         account.serverUrl,
                                         account.username,
                                         account.passwordOrToken,
                                         path,
-                                        targetLocalFile,
-                                        account.trustAllCerts,
-                                        stallTimeout
-                                    ).getOrNull() ?: remote.etag
-                                }
-                                if (remote.lastModified > 0L) {
-                                    FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
-                                }
-                                bytesTransferred += targetLocalFile.length()
-                                journalDao.insertOrUpdate(
-                                    SyncJournalEntryEntity(
-                                        remotePath = path,
-                                        localRelativePath = relativeLocalPath,
-                                        isDirectory = false,
-                                        remoteEtag = etag,
-                                        remoteSize = targetLocalFile.length(),
-                                        remoteMtime = remote.lastModified,
-                                        localSize = targetLocalFile.length(),
-                                        localMtime = targetLocalFile.lastModified(),
-                                        fileId = remote.fileId ?: ""
+                                        account.trustAllCerts
                                     )
-                                )
-                                repository.logActivity(
-                                    ActivityType.DOWNLOAD,
-                                    path,
-                                    if (journal != null) "Safeguard: Downloaded Nextcloud file '${targetLocalFile.name}' (re-selected folder protection)"
-                                    else "Downloaded new file from Nextcloud",
-                                    targetLocalFile.length()
-                                )
+                                }
+                                journalDao.deleteByRemotePath(path)
+                                if (remote.isDirectory) {
+                                    locallyDeletedDirsInThisRun.add(path)
+                                    journalDao.deleteByPathPrefix(path)
+                                }
+                                repository.logActivity(ActivityType.DELETE_REMOTE, path, "Deleted from Nextcloud (deleted locally)")
+                            } else {
+                                // Safeguard download: new remote file/folder or remote file was updated on server while absent locally
+                                if (remote.isDirectory) {
+                                    targetLocalFile.mkdirs()
+                                    newlyCreatedLocalDirsInThisRun.add(path)
+                                    journalDao.insertOrUpdate(
+                                        SyncJournalEntryEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isDirectory = true,
+                                            remoteEtag = cleanEtag(remote.etag),
+                                            remoteSize = 0L,
+                                            remoteMtime = remote.lastModified,
+                                            localSize = 0L,
+                                            localMtime = targetLocalFile.lastModified(),
+                                            fileId = remote.fileId ?: ""
+                                        )
+                                    )
+                                    repository.logActivity(ActivityType.CREATE_DIR_LOCAL, path, "Created local folder for '${remote.displayName}'")
+                                } else {
+                                    _syncState.value = _syncState.value.copy(currentAction = "Downloading ${targetLocalFile.name}")
+                                    val downloadedEtag = if (account.isSimulatedDemo) {
+                                        repository.mockServer.downloadFile(path, targetLocalFile).getOrNull()?.ifBlank { null } ?: remote.etag
+                                    } else {
+                                        repository.nextcloudClient.downloadFile(
+                                            account.serverUrl,
+                                            account.username,
+                                            account.passwordOrToken,
+                                            path,
+                                            targetLocalFile,
+                                            account.trustAllCerts,
+                                            stallTimeout
+                                        ).getOrNull()?.ifBlank { null } ?: remote.etag
+                                    }
+                                    if (remote.lastModified > 0L) {
+                                        FileTimeHelper.setLastModified(targetLocalFile, remote.lastModified)
+                                    }
+                                    bytesTransferred += targetLocalFile.length()
+                                    journalDao.insertOrUpdate(
+                                        SyncJournalEntryEntity(
+                                            remotePath = path,
+                                            localRelativePath = relativeLocalPath,
+                                            isDirectory = false,
+                                            remoteEtag = cleanEtag(downloadedEtag).ifBlank { cleanEtag(remote.etag) },
+                                            remoteSize = targetLocalFile.length(),
+                                            remoteMtime = remote.lastModified,
+                                            localSize = targetLocalFile.length(),
+                                            localMtime = targetLocalFile.lastModified(),
+                                            fileId = remote.fileId ?: ""
+                                        )
+                                    )
+                                    repository.logActivity(
+                                        ActivityType.DOWNLOAD,
+                                        path,
+                                        if (journal != null) "Safeguard: Downloaded Nextcloud file '${targetLocalFile.name}' (remote modified on server)"
+                                        else "Downloaded new file from Nextcloud",
+                                        targetLocalFile.length()
+                                    )
+                                }
                             }
                         }
                     } else if (remote == null && local != null) {
@@ -671,8 +708,8 @@ class SyncEngine(
                 val origLocalSize = localFile.length()
                 localFile.renameTo(conflictCopy)
 
-                val etag = if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
+                val downloadedEtag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull()?.ifBlank { null } ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -681,7 +718,7 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    ).getOrNull() ?: remote.etag
+                    ).getOrNull()?.ifBlank { null } ?: remote.etag
                 }
                 if (remote.lastModified > 0L) {
                     FileTimeHelper.setLastModified(localFile, remote.lastModified)
@@ -693,7 +730,7 @@ class SyncEngine(
                         localRelativePath = relativeLocalPath,
                         localMtime = origLocalMtime,
                         localSize = origLocalSize,
-                        remoteEtag = remote.etag,
+                        remoteEtag = cleanEtag(remote.etag),
                         remoteMtime = remote.lastModified,
                         remoteSize = remote.size,
                         conflictLocalFileName = conflictName,
@@ -707,7 +744,7 @@ class SyncEngine(
                         remotePath = path,
                         localRelativePath = relativeLocalPath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(downloadedEtag).ifBlank { cleanEtag(remote.etag) },
                         remoteSize = localFile.length(),
                         remoteMtime = remote.lastModified,
                         localSize = localFile.length(),
@@ -725,8 +762,8 @@ class SyncEngine(
             ConflictStrategy.KEEP_BOTH_RENAME -> {
                 val conflictCopy = File(localFile.parentFile, conflictName)
                 localFile.renameTo(conflictCopy)
-                val etag = if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
+                val downloadedEtag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull()?.ifBlank { null } ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -735,7 +772,7 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    ).getOrNull() ?: remote.etag
+                    ).getOrNull()?.ifBlank { null } ?: remote.etag
                 }
                 if (remote.lastModified > 0L) {
                     FileTimeHelper.setLastModified(localFile, remote.lastModified)
@@ -745,7 +782,7 @@ class SyncEngine(
                         remotePath = path,
                         localRelativePath = relativeLocalPath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(downloadedEtag).ifBlank { cleanEtag(remote.etag) },
                         remoteSize = localFile.length(),
                         remoteMtime = remote.lastModified,
                         localSize = localFile.length(),
@@ -761,7 +798,7 @@ class SyncEngine(
             }
             ConflictStrategy.PREFER_LOCAL -> {
                 val etag = if (account.isSimulatedDemo) {
-                    repository.mockServer.uploadFile(path, localFile, localFile.lastModified()).getOrNull()
+                    repository.mockServer.uploadFile(path, localFile, localFile.lastModified()).getOrNull()?.ifBlank { null }
                         ?: "etag_${System.currentTimeMillis()}"
                 } else {
                     repository.nextcloudClient.uploadFile(
@@ -772,14 +809,14 @@ class SyncEngine(
                         localFile,
                         localFile.lastModified(),
                         account.trustAllCerts
-                    ).getOrNull() ?: "etag_${System.currentTimeMillis()}"
+                    ).getOrNull()?.ifBlank { null } ?: "etag_${System.currentTimeMillis()}"
                 }
                 journalDao.insertOrUpdate(
                     SyncJournalEntryEntity(
                         remotePath = path,
                         localRelativePath = relativeLocalPath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(etag),
                         remoteSize = localFile.length(),
                         remoteMtime = localFile.lastModified(),
                         localSize = localFile.length(),
@@ -790,8 +827,8 @@ class SyncEngine(
                 repository.logActivity(ActivityType.CONFLICT_RESOLVED, path, "Conflict resolved (Kept local file)")
             }
             ConflictStrategy.PREFER_REMOTE -> {
-                val etag = if (account.isSimulatedDemo) {
-                    repository.mockServer.downloadFile(path, localFile).getOrNull() ?: remote.etag
+                val downloadedEtag = if (account.isSimulatedDemo) {
+                    repository.mockServer.downloadFile(path, localFile).getOrNull()?.ifBlank { null } ?: remote.etag
                 } else {
                     repository.nextcloudClient.downloadFile(
                         account.serverUrl,
@@ -800,7 +837,7 @@ class SyncEngine(
                         path,
                         localFile,
                         account.trustAllCerts
-                    ).getOrNull() ?: remote.etag
+                    ).getOrNull()?.ifBlank { null } ?: remote.etag
                 }
                 if (remote.lastModified > 0L) {
                     FileTimeHelper.setLastModified(localFile, remote.lastModified)
@@ -810,7 +847,7 @@ class SyncEngine(
                         remotePath = path,
                         localRelativePath = relativeLocalPath,
                         isDirectory = false,
-                        remoteEtag = etag,
+                        remoteEtag = cleanEtag(downloadedEtag).ifBlank { cleanEtag(remote.etag) },
                         remoteSize = localFile.length(),
                         remoteMtime = remote.lastModified,
                         localSize = localFile.length(),
@@ -873,5 +910,14 @@ class SyncEngine(
                 currentAction = "All conflicts resolved • Files synchronized"
             )
         }
+    }
+
+    private fun cleanEtag(etag: String?): String {
+        if (etag.isNullOrBlank()) return ""
+        return etag.trim()
+            .removePrefix("W/")
+            .removePrefix("w/")
+            .removeSurrounding("\"")
+            .trim()
     }
 }

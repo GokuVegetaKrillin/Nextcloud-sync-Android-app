@@ -92,7 +92,7 @@ object WebDavXmlParser {
                         }
                         "getetag" -> {
                             if (inProp) {
-                                val text = parser.nextText().trim().removeSurrounding("\"")
+                                val text = parser.nextText().trim().removePrefix("W/").removePrefix("w/").removeSurrounding("\"").trim()
                                 if (text.isNotEmpty()) etag = text
                             }
                         }
