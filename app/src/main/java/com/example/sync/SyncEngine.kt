@@ -180,10 +180,14 @@ class SyncEngine(
             val currentFolders = folderDao.getAllFolders()
             val enabledFolders = currentFolders.filter { it.isSelected }
 
-            // 3b. Sanitize journal: Purge any journal entries belonging to unselected folders
-            val unselectedFolders = currentFolders.filter { !it.isSelected }
-            for (unselected in unselectedFolders) {
-                journalDao.deleteByPathPrefix(unselected.remotePath)
+            // 3b. Sanitize journal: Purge any journal entries that are not effectively selected.
+            // Using hierarchical effective selection ensures entries in selected subfolders (e.g. /Documents/Work)
+            // are kept even if an ancestor folder (e.g. /Documents) is unselected.
+            val allJournal = journalDao.getAllJournalEntries()
+            for (entry in allJournal) {
+                if (!isPathSelected(entry.remotePath, currentFolders, entry.isDirectory)) {
+                    journalDao.deleteByRemotePath(entry.remotePath)
+                }
             }
 
             // 4. Discover all remote items recursively inside enabled folders + root files
@@ -202,6 +206,24 @@ class SyncEngine(
                     } else {
                         // Genuine root-level file (e.g. /Readme.md)
                         allRemoteItemsMap[item.path] = item
+                    }
+                }
+            }
+
+            // Ensure every enabled folder itself is recorded in allRemoteItemsMap
+            for (folder in enabledFolders) {
+                val folderClean = "/" + folder.remotePath.trim('/')
+                if (folderClean.isNotEmpty() && folderClean != "/") {
+                    if (!allRemoteItemsMap.containsKey(folderClean)) {
+                        allRemoteItemsMap[folderClean] = WebDavItem(
+                            href = folderClean,
+                            path = folderClean,
+                            displayName = folder.displayName.ifEmpty { folderClean.substringAfterLast('/') },
+                            isDirectory = true,
+                            size = folder.remoteSize,
+                            etag = "",
+                            lastModified = folder.lastSyncTime
+                        )
                     }
                 }
             }
@@ -268,36 +290,15 @@ class SyncEngine(
             allPaths.addAll(localFilesMap.keys)
             allPaths.addAll(journalMap.keys)
 
-            // Filter paths belonging to enabled folders (or subdirectories) or genuine root level files
+            // Filter paths using effective hierarchical selection (most specific configured folder wins)
             // Folders that are not selected for synchronization must NEVER be created or processed!
             val targetPaths = allPaths.filter { path ->
-                // 1. Strictly exclude any path belonging to or inside an unselected folder
-                val belongsToUnselected = unselectedFolders.any { unselected ->
-                    path == unselected.remotePath || path.startsWith("${unselected.remotePath}/")
-                }
-                if (belongsToUnselected) {
-                    return@filter false
-                }
-
-                // 2. Identify if this path represents a folder
                 val isDirectory = allRemoteItemsMap[path]?.isDirectory == true ||
                     localFilesMap[path]?.isDirectory == true ||
                     journalMap[path]?.isDirectory == true ||
                     currentFolders.any { it.remotePath == path }
 
-                if (isDirectory) {
-                    // Folders must explicitly be selected or be inside an enabled folder
-                    enabledFolders.any { folder ->
-                        path == folder.remotePath || path.startsWith("${folder.remotePath}/")
-                    }
-                } else {
-                    // Files: must either belong to an enabled folder or be a genuine root-level file (e.g. /notes.txt)
-                    val belongsToSelected = enabledFolders.any { folder ->
-                        path.startsWith("${folder.remotePath}/")
-                    }
-                    val isRootFile = !path.removePrefix("/").contains("/") && currentFolders.none { it.remotePath == path }
-                    isRootFile || belongsToSelected
-                }
+                isPathSelected(path, currentFolders, isDirectory)
             }.sortedWith(compareBy({ !it.contains("/") }, { it.count { c -> c == '/' } }, { it }))
 
             if (targetPaths.isEmpty() && enabledFolders.isEmpty()) {
@@ -1071,5 +1072,49 @@ class SyncEngine(
             .removePrefix("w/")
             .removeSurrounding("\"")
             .trim()
+    }
+
+    companion object {
+        /**
+         * Determines the effective selection state for [path] based on its most specific configured ancestor in [folders].
+         *
+         * For example:
+         * /Documents              (isSelected = false)
+         * /Documents/Work         (isSelected = true)
+         * /Documents/Work/Private (isSelected = false)
+         *
+         * Then:
+         * /Documents/foo.txt             -> false (ancestor /Documents)
+         * /Documents/Work/test.md        -> true  (most specific ancestor /Documents/Work)
+         * /Documents/Work/Subdir/note.md -> true  (most specific ancestor /Documents/Work)
+         * /Documents/Work/Private/key.md -> false (most specific ancestor /Documents/Work/Private)
+         * /Readme.md                     -> true  (genuine root-level file)
+         */
+        fun isPathSelected(
+            path: String,
+            folders: List<SyncFolderConfigEntity>,
+            isDirectory: Boolean = false
+        ): Boolean {
+            val cleanPath = "/" + path.trim('/')
+            if (cleanPath == "/") return false
+
+            val matchingFolders = folders.filter { folder ->
+                val folderClean = "/" + folder.remotePath.trim('/')
+                cleanPath == folderClean || cleanPath.startsWith("$folderClean/")
+            }
+
+            if (matchingFolders.isEmpty()) {
+                // Genuine root-level file: has no subdirectories and is not a folder
+                val hasNoSubpath = !cleanPath.removePrefix("/").contains("/")
+                return hasNoSubpath && !isDirectory
+            }
+
+            // The most specific matching folder (the longest remotePath) wins.
+            val mostSpecific = matchingFolders.maxByOrNull {
+                ("/" + it.remotePath.trim('/')).length
+            }
+
+            return mostSpecific?.isSelected == true
+        }
     }
 }

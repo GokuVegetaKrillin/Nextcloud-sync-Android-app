@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.example.data.model.ActivityType
 import com.example.data.model.ConflictStrategy
+import com.example.data.model.SyncFolderConfigEntity
 import com.example.data.model.SyncIntervalUnit
 import com.example.data.repository.ConflictResolution
 import com.example.data.repository.NextcloudRepository
@@ -344,6 +345,171 @@ class SyncEngineRobolectricTest {
         val serverPhotosDir = File(serverRootDir, "Photos")
         val serverPhotosFiles = serverPhotosDir.listFiles() ?: emptyArray()
         assertTrue("Server photos must still exist on server and not be deleted", serverPhotosFiles.isNotEmpty())
+    }
+
+    @Test
+    fun testIsPathSelectedHierarchicalLogic() {
+        val folders = listOf(
+            SyncFolderConfigEntity(
+                remotePath = "/Documents",
+                localRelativePath = "Documents",
+                isSelected = false,
+                displayName = "Documents",
+                isExplicitlyConfigured = true,
+                remoteSize = 0,
+                lastSyncTime = 0
+            ),
+            SyncFolderConfigEntity(
+                remotePath = "/Documents/Work",
+                localRelativePath = "Documents/Work",
+                isSelected = true,
+                displayName = "Work",
+                isExplicitlyConfigured = true,
+                remoteSize = 0,
+                lastSyncTime = 0
+            ),
+            SyncFolderConfigEntity(
+                remotePath = "/Documents/Work/Private",
+                localRelativePath = "Documents/Work/Private",
+                isSelected = false,
+                displayName = "Private",
+                isExplicitlyConfigured = true,
+                remoteSize = 0,
+                lastSyncTime = 0
+            ),
+            SyncFolderConfigEntity(
+                remotePath = "/Photos",
+                localRelativePath = "Photos",
+                isSelected = false,
+                displayName = "Photos",
+                isExplicitlyConfigured = true,
+                remoteSize = 0,
+                lastSyncTime = 0
+            )
+        )
+
+        // 1. File directly inside unselected /Documents
+        assertFalse(
+            "File directly in unselected parent should not be selected",
+            SyncEngine.isPathSelected("/Documents/parent_only.txt", folders, isDirectory = false)
+        )
+
+        // 2. Unselected /Documents directory itself
+        assertFalse(
+            "Unselected parent directory itself should not be selected",
+            SyncEngine.isPathSelected("/Documents", folders, isDirectory = true)
+        )
+
+        // 3. Selected /Documents/Work directory itself
+        assertTrue(
+            "Explicitly selected child directory should be selected",
+            SyncEngine.isPathSelected("/Documents/Work", folders, isDirectory = true)
+        )
+
+        // 4. File inside selected /Documents/Work
+        assertTrue(
+            "File in selected child should be selected",
+            SyncEngine.isPathSelected("/Documents/Work/test.md", folders, isDirectory = false)
+        )
+
+        // 5. Newly created subfolder inside selected /Documents/Work
+        assertTrue(
+            "Subfolder created inside selected folder should be selected",
+            SyncEngine.isPathSelected("/Documents/Work/NewProject", folders, isDirectory = true)
+        )
+        assertTrue(
+            "File inside subfolder of selected folder should be selected",
+            SyncEngine.isPathSelected("/Documents/Work/NewProject/file.kt", folders, isDirectory = false)
+        )
+
+        // 6. Explicitly unselected grandchild /Documents/Work/Private
+        assertFalse(
+            "Explicitly unselected grandchild directory should not be selected",
+            SyncEngine.isPathSelected("/Documents/Work/Private", folders, isDirectory = true)
+        )
+        assertFalse(
+            "File in unselected grandchild should not be selected",
+            SyncEngine.isPathSelected("/Documents/Work/Private/secret.key", folders, isDirectory = false)
+        )
+
+        // 7. Root-level file with no folder component
+        assertTrue(
+            "Root file should be selected",
+            SyncEngine.isPathSelected("/Readme.md", folders, isDirectory = false)
+        )
+        assertFalse(
+            "Unconfigured root directory should not be treated as a root file",
+            SyncEngine.isPathSelected("/UnconfiguredFolder", folders, isDirectory = true)
+        )
+    }
+
+    @Test
+    fun testNestedSelectedFolderSynchronizesWhenParentUnselected() = runBlocking {
+        // Setup: Fetch subfolders of /Documents so /Documents/Work exists
+        repository.fetchSubfolders("/Documents")
+
+        // Exclude parent /Documents, but select child /Documents/Work
+        repository.updateFolderSelection("/Documents", false)
+        repository.updateFolderSelection("/Documents/Work", true)
+
+        // Add a file in /Documents/Work on mock server
+        repository.mockServer.addRemoteFile("/Documents/Work/test.md", "# Work Document Content")
+
+        // Also add a file in /Documents (which is unselected) on mock server
+        repository.mockServer.addRemoteFile("/Documents/unselected_file.txt", "This should NOT sync")
+
+        // Run sync
+        syncEngine.performSynchronization(isManual = true)
+
+        // 1. Verify /Documents/Work/test.md was downloaded locally
+        val localWorkDir = File(repository.localSyncRootDir, "Documents/Work")
+        val localWorkFile = File(localWorkDir, "test.md")
+        assertTrue("Local /Documents/Work directory must exist", localWorkDir.exists())
+        assertTrue("Local /Documents/Work/test.md must be downloaded", localWorkFile.exists())
+        assertEquals("# Work Document Content", localWorkFile.readText())
+
+        // 2. Verify file in unselected /Documents was NOT downloaded
+        val localUnselectedFile = File(repository.localSyncRootDir, "Documents/unselected_file.txt")
+        assertFalse("File in unselected parent folder must NOT be downloaded", localUnselectedFile.exists())
+
+        // 3. Verify journal entry for /Documents/Work/test.md was created and PRESERVED
+        val journalEntry = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Work/test.md")
+        assertNotNull("Journal entry for nested selected file must exist", journalEntry)
+
+        // 4. Run sync again to verify journal entry is NOT wiped by journal sanitization
+        syncEngine.performSynchronization(isManual = true)
+        val journalEntryAfterSecondSync = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Work/test.md")
+        assertNotNull("Journal entry must NOT be wiped by subsequent syncs", journalEntryAfterSecondSync)
+        assertTrue("Local file must still exist after second sync", localWorkFile.exists())
+    }
+
+    @Test
+    fun testNewlyCreatedSubfolderInsideSyncedFolderAutomaticallySyncs() = runBlocking {
+        // Select /Documents
+        repository.updateFolderSelection("/Documents", true)
+        syncEngine.performSynchronization(isManual = true)
+
+        // Create a new subfolder locally inside /Documents
+        val subDir = File(repository.localSyncRootDir, "Documents/AutoCreatedSubfolder")
+        subDir.mkdirs()
+        val subFile = File(subDir, "auto_synced.txt")
+        subFile.writeText("Automatically synchronized subfolder file")
+
+        // Run sync
+        syncEngine.performSynchronization(isManual = true)
+
+        // Verify that server received the new subfolder and file
+        val serverRootDir = File(context.filesDir, "mock_nextcloud_remote_storage")
+        val serverSubDir = File(serverRootDir, "Documents/AutoCreatedSubfolder")
+        val serverSubFile = File(serverSubDir, "auto_synced.txt")
+
+        assertTrue("Server must have received automatically synced subfolder", serverSubDir.exists())
+        assertTrue("Server must have received file in automatically synced subfolder", serverSubFile.exists())
+        assertEquals("Automatically synchronized subfolder file", serverSubFile.readText())
+
+        // Verify journal entry exists
+        val journal = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/AutoCreatedSubfolder/auto_synced.txt")
+        assertNotNull("Journal entry must exist for newly created subfolder file", journal)
     }
 }
 
