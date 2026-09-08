@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.example.data.model.ActivityType
 import com.example.data.model.ConflictStrategy
 import com.example.data.model.SyncIntervalUnit
 import com.example.data.repository.ConflictResolution
@@ -196,6 +197,56 @@ class SyncEngineRobolectricTest {
         // Verify conflict is resolved
         val remainingConflicts = repository.getUnresolvedConflicts()
         assertTrue("Conflict should now be marked resolved", remainingConflicts.none { it.remotePath == "/Documents/Project-Roadmap.md" })
+    }
+
+    @Test
+    fun testLocalFileDeletionPropagatesToServer() = runBlocking {
+        // 1. Initial sync establishes baseline journal
+        syncEngine.performSynchronization(isManual = true)
+
+        val localDocsDir = File(repository.localSyncRootDir, "Documents")
+        val roadmapFile = File(localDocsDir, "Project-Roadmap.md")
+        assertTrue("Project roadmap file should exist locally after initial sync", roadmapFile.exists())
+
+        val serverRootDir = File(context.filesDir, "mock_nextcloud_remote_storage")
+        val serverRoadmap = File(serverRootDir, "Documents/Project-Roadmap.md")
+        assertTrue("Server roadmap file must exist", serverRoadmap.exists())
+
+        val journalBefore = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Project-Roadmap.md")
+        assertNotNull("Journal entry should exist after initial sync", journalBefore)
+
+        // 2. User deletes file locally
+        assertTrue("Local file must be deleted", roadmapFile.delete())
+        assertFalse("Local file must not exist", roadmapFile.exists())
+
+        // 3. Perform synchronization
+        syncEngine.performSynchronization(isManual = true)
+
+        // 4. File should be deleted on server, NOT re-downloaded locally, and journal record removed
+        assertFalse("Local file must NOT be re-downloaded", roadmapFile.exists())
+        assertFalse("Server file must be deleted from server", serverRoadmap.exists())
+
+        val journalAfter = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Project-Roadmap.md")
+        assertNull("Journal entry should be removed from database after deletion propagation", journalAfter)
+
+        // 5. Verify activity log recorded both local and remote deletion events
+        val activities = repository.databaseInstance().syncActivityDao().getAllActivities()
+        val localDeleteEvent = activities.find { it.type == ActivityType.DELETE_LOCAL && it.path == "/Documents/Project-Roadmap.md" }
+        val remoteDeleteEvent = activities.find { it.type == ActivityType.DELETE_REMOTE && it.path == "/Documents/Project-Roadmap.md" }
+        assertNotNull("DELETE_LOCAL activity event should be logged", localDeleteEvent)
+        assertNotNull("DELETE_REMOTE activity event should be logged", remoteDeleteEvent)
+
+        // 6. Test recreating the file locally - should be treated as a brand new file
+        val recreatedFile = repository.createLocalFile("/Documents", "Project-Roadmap.md", "# Recreated Brand New Roadmap")
+        assertTrue("Recreated file must exist locally", recreatedFile.exists())
+
+        syncEngine.performSynchronization(isManual = true)
+
+        assertTrue("Server roadmap file should now be uploaded as a new file", serverRoadmap.exists())
+        assertEquals("# Recreated Brand New Roadmap", serverRoadmap.readText())
+
+        val journalRecreated = repository.databaseInstance().syncJournalDao().getJournalEntry("/Documents/Project-Roadmap.md")
+        assertNotNull("Journal entry must be recreated for the new file", journalRecreated)
     }
 }
 

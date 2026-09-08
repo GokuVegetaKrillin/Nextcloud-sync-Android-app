@@ -668,9 +668,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteLocalFile(file: File) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.deleteLocalFile(file)
+            val relPath = "/" + (file.relativeToOrNull(repository.localSyncRootDir)?.path?.replace('\\', '/') ?: file.name).trim('/')
+            val isDir = file.isDirectory
+            val name = file.name
+            val success = repository.deleteLocalFile(file)
+            if (success) {
+                repository.logActivity(
+                    ActivityType.DELETE_LOCAL,
+                    relPath,
+                    "Deleted local ${if (isDir) "folder" else "file"}: '$name'"
+                )
+            }
             refreshLocalFiles()
-            _statusMessage.value = "Deleted local file: ${file.name}"
+            _statusMessage.value = "Deleted local file: $name"
         }
     }
 }

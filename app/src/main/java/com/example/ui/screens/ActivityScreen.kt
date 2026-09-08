@@ -29,11 +29,18 @@ fun ActivityScreen(
     viewModel: MainViewModel
 ) {
     val activities by viewModel.activities.collectAsState()
-    var selectedFilter by remember { mutableStateOf<ActivityType?>(null) }
+    var selectedFilterCategory by remember { mutableStateOf<String?>(null) }
 
-    val filteredActivities = remember(activities, selectedFilter) {
-        if (selectedFilter == null) activities
-        else activities.filter { it.type == selectedFilter }
+    val filteredActivities = remember(activities, selectedFilterCategory) {
+        when (selectedFilterCategory) {
+            null -> activities
+            "UPLOADS" -> activities.filter { it.type == ActivityType.UPLOAD }
+            "DOWNLOADS" -> activities.filter { it.type == ActivityType.DOWNLOAD }
+            "DELETIONS" -> activities.filter { it.type == ActivityType.DELETE_LOCAL || it.type == ActivityType.DELETE_REMOTE }
+            "CONFLICTS" -> activities.filter { it.type == ActivityType.CONFLICT_DETECTED || it.type == ActivityType.CONFLICT_RESOLVED }
+            "ERRORS" -> activities.filter { it.type == ActivityType.ERROR }
+            else -> activities
+        }
     }
 
     Column(
@@ -84,36 +91,43 @@ fun ActivityScreen(
         ) {
             item {
                 FilterChip(
-                    selected = selectedFilter == null,
-                    onClick = { selectedFilter = null },
+                    selected = selectedFilterCategory == null,
+                    onClick = { selectedFilterCategory = null },
                     label = { Text("All (${activities.size})") }
                 )
             }
             item {
                 FilterChip(
-                    selected = selectedFilter == ActivityType.UPLOAD,
-                    onClick = { selectedFilter = if (selectedFilter == ActivityType.UPLOAD) null else ActivityType.UPLOAD },
+                    selected = selectedFilterCategory == "UPLOADS",
+                    onClick = { selectedFilterCategory = if (selectedFilterCategory == "UPLOADS") null else "UPLOADS" },
                     label = { Text("Uploads") }
                 )
             }
             item {
                 FilterChip(
-                    selected = selectedFilter == ActivityType.DOWNLOAD,
-                    onClick = { selectedFilter = if (selectedFilter == ActivityType.DOWNLOAD) null else ActivityType.DOWNLOAD },
+                    selected = selectedFilterCategory == "DOWNLOADS",
+                    onClick = { selectedFilterCategory = if (selectedFilterCategory == "DOWNLOADS") null else "DOWNLOADS" },
                     label = { Text("Downloads") }
                 )
             }
             item {
                 FilterChip(
-                    selected = selectedFilter == ActivityType.CONFLICT_DETECTED || selectedFilter == ActivityType.CONFLICT_RESOLVED,
-                    onClick = { selectedFilter = if (selectedFilter == ActivityType.CONFLICT_DETECTED) null else ActivityType.CONFLICT_DETECTED },
+                    selected = selectedFilterCategory == "DELETIONS",
+                    onClick = { selectedFilterCategory = if (selectedFilterCategory == "DELETIONS") null else "DELETIONS" },
+                    label = { Text("Deletions") }
+                )
+            }
+            item {
+                FilterChip(
+                    selected = selectedFilterCategory == "CONFLICTS",
+                    onClick = { selectedFilterCategory = if (selectedFilterCategory == "CONFLICTS") null else "CONFLICTS" },
                     label = { Text("Conflicts") }
                 )
             }
             item {
                 FilterChip(
-                    selected = selectedFilter == ActivityType.ERROR,
-                    onClick = { selectedFilter = if (selectedFilter == ActivityType.ERROR) null else ActivityType.ERROR },
+                    selected = selectedFilterCategory == "ERRORS",
+                    onClick = { selectedFilterCategory = if (selectedFilterCategory == "ERRORS") null else "ERRORS" },
                     label = { Text("Errors") }
                 )
             }
