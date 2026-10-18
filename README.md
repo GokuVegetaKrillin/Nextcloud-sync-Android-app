@@ -1,1 +1,1 @@
-Warning: Make sure to back up any files before you attempt to synchronize them. There is no guarantee that the synchronization of this application will work correctly, and so failure to back up may result in data loss.
+Warning: Make sure to back up any files before you attempt to synchronize them. There is no guarantee that the synchronization of this application will work correctly, and so failure to back up may result in data loss. there are currently some bugs in the app that, under the right conditions, will result in data loss.
